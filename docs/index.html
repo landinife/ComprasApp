@@ -553,7 +553,8 @@ function renderForm(){
       <div><label>Tipo de cambio ref. (opcional)</label><input type="number" inputmode="decimal" step="any" value="${f.tipoCambio??''}" placeholder="ARS por USD" oninput="setF('tipoCambio',this.value)"></div>
     </div>
   </div>
-  <div class="card"><h3>Ítems</h3><div id="items"></div><button class="btn" onclick="agregarItem()">＋ Agregar ítem</button></div>
+  <div class="card"><h3>Ítems</h3><div id="items"></div>
+    <div class="acciones" style="margin-top:0"><button class="btn" onclick="agregarItem()">＋ Agregar ítem</button><button class="btn" onclick="modalPegar()">Pegar desde planilla</button></div></div>
   <div class="card">
     <label style="color:var(--text);font-size:15px"><input type="checkbox" ${f.discriminarIva?'checked':''} onchange="setF('discriminarIva',this.checked)">Discriminar IVA</label>
     <div id="f-iva-sel" style="${f.discriminarIva?'':'display:none'}"><label>Alícuota de IVA</label>
@@ -626,6 +627,50 @@ function setItem(i,campo,valor){
 }
 function agregarItem(){ S.form.items.push(itemVacio()); renderItems(); renderTotales(); }
 function quitarItem(i){ if(!confirm('¿Quitar el ítem '+(i+1)+'?')) return; S.form.items.splice(i,1); renderItems(); renderTotales(); }
+// ---- Carga masiva: pegar filas copiadas del Sheet ----
+// Columnas: Descripción | Precio unitario | Unidad | Cantidad
+// Número con formato argentino: 1.234,56 · $ 1.500 · 2,5
+function numAR(v){
+  let s=String(v??'').replace(/[^\d.,-]/g,'');
+  if(s.includes(',')) s=s.replace(/\./g,'').replace(',','.');
+  else if(/^-?\d{1,3}(\.\d{3})+$/.test(s)) s=s.replace(/\./g,'');
+  const n=parseFloat(s); return isFinite(n)?n:NaN;
+}
+// Usa la unidad de la lista aunque cambien mayúsculas (KG → kg); si no existe, la deja como viene
+function unidadPegada(u){ u=String(u||'').trim(); if(!u) return S.cfg.unidades[0]||'u'; return S.cfg.unidades.find(x=>x.toLowerCase()===u.toLowerCase())||u; }
+function leerPegado(txt){
+  return String(txt||'').split(/\r?\n/).map(f=>f.split('\t').map(c=>c.trim().replace(/^"|"$/g,'')))
+    .filter(c=>c[0])
+    .map(c=>({descripcion:c[0], precioUnit:numAR(c[1]), unidad:unidadPegada(c[2]), cantidad:numAR(c[3])}))
+    .filter(r=>!(isNaN(r.precioUnit)&&isNaN(r.cantidad))); // saltea el encabezado si se copió
+}
+function modalPegar(){
+  abrirModal(`<h3>Pegar ítems desde planilla</h3>
+    <p class="muted">Copiá en el Sheet las columnas <b>Descripción · Precio unitario · Unidad · Cantidad</b> (en ese orden) y pegalas acá.</p>
+    <textarea id="pg-txt" style="min-height:140px" placeholder="Pegá acá las celdas copiadas" oninput="vistaPegado()"></textarea>
+    <div id="pg-vista" style="margin-top:10px"></div>
+    <div class="acciones"><button class="btn" onclick="cerrarModal()">Cancelar</button><button class="btn pri" id="pg-ok" disabled onclick="agregarPegados()">Agregar ítems</button></div>`,'ancho');
+  setTimeout(()=>$('pg-txt')&&$('pg-txt').focus(),100);
+}
+// Vista previa de lo que entendió antes de agregar
+function vistaPegado(){
+  const l=leerPegado($('pg-txt').value), m=S.form.moneda;
+  $('pg-ok').disabled=!l.length; $('pg-ok').textContent=l.length?`Agregar ${l.length} ítem${l.length===1?'':'s'}`:'Agregar ítems';
+  $('pg-vista').innerHTML=l.length?`<table class="tabla-items"><tr><th>Descripción</th><th class="der">Cant.</th><th class="der">P. unit.</th></tr>
+    ${l.map(r=>`<tr><td>${esc(r.descripcion)}</td><td class="der ${!(r.cantidad>0)?'txt-rojo':''}">${isNaN(r.cantidad)?'—':fmtCant(r.cantidad)} ${esc(r.unidad)}</td><td class="der">${isNaN(r.precioUnit)?'—':fmtMon(r.precioUnit,m)}</td></tr>`).join('')}</table>
+    ${l.some(r=>!(r.cantidad>0))?'<div class="pista txt-rojo">Las filas en rojo no tienen cantidad: corregilas después en la OC.</div>':''}`
+    :(String($('pg-txt').value).trim()?'<div class="muted">No se reconocieron filas. Revisá el orden de las columnas.</div>':'');
+}
+// Agrega los ítems (quita los ítems vacíos que hubiera)
+function agregarPegados(){
+  const l=leerPegado($('pg-txt').value); if(!l.length) return;
+  const f=S.form, vacio=it=>!it.stockId&&!String(it.descripcion).trim()&&!num(it.precioUnit);
+  f.items=f.items.filter(it=>!vacio(it));
+  l.forEach(r=>f.items.push({...itemVacio(), descripcion:r.descripcion, unidad:r.unidad,
+    cantidad:isNaN(r.cantidad)?0:r.cantidad, precioUnit:isNaN(r.precioUnit)?0:r.precioUnit}));
+  cerrarModal(); renderItems(); renderTotales();
+  toast(`${l.length} ítem${l.length===1?'':'s'} agregado${l.length===1?'':'s'}`);
+}
 // Calcula subtotal, IVA y total
 function calcTotales(f){
   const sub=redondear((f.items||[]).reduce((s,it)=>s+num(it.cantidad)*num(it.precioUnit),0));
@@ -1086,8 +1131,7 @@ function generarPDF(o){
   doc.setFontSize(9.5); lp.forEach((l,i)=>{ doc.setFont('helvetica',i===0?'bold':'normal'); doc.text(l,M+3,y+9+i*4.5); });
   y+=hP+5;
   doc.setFont('helvetica','normal'); doc.setFontSize(9);
-  const d=o.destinoSnap||{};
-  doc.text(`Destino: ${d.nombre||'—'}${d.codigo?' ('+d.codigo+')':''}     Moneda: ${m==='USD'?'Dólares (USD)':'Pesos (ARS)'}${o.tipoCambio?'     T.C. ref.: $ '+fmtNum(o.tipoCambio):''}`,M,y);
+  doc.text(`Moneda: ${m==='USD'?'Dólares (USD)':'Pesos (ARS)'}${o.tipoCambio?'     T.C. ref.: $ '+fmtNum(o.tipoCambio):''}`,M,y);
   y+=4;
   // Tabla de ítems
   doc.autoTable({
@@ -1117,10 +1161,6 @@ function generarPDF(o){
   const bloque=(tit,txt)=>{ if(!txt) return; const t=doc.splitTextToSize(txt,W-2*M-38); if(y+t.length*4.5>265){doc.addPage();y=M;}
     doc.setFont('helvetica','bold'); doc.text(tit,M,y); doc.setFont('helvetica','normal'); doc.text(t,M+38,y); y+=t.length*4.5+2; };
   bloque('Condición de pago:',o.condicionPago); bloque('Lugar de entrega:',o.lugarEntrega); bloque('Observaciones:',o.observaciones);
-  // Firma
-  let yf=Math.max(y+22,255); if(yf>280){ doc.addPage(); yf=40; }
-  doc.setDrawColor(80); doc.line(W-M-70,yf,W-M,yf);
-  doc.setFontSize(8.5); doc.text('Firma y aclaración',W-M-35,yf+4,{align:'center'});
   // Pie de página
   const n=doc.getNumberOfPages();
   for(let i=1;i<=n;i++){ doc.setPage(i); doc.setFontSize(7.5); doc.setTextColor(130); doc.text(`${o.numero} · Página ${i} de ${n}`,W/2,292,{align:'center'}); doc.setTextColor(0); }

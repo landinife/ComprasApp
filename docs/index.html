@@ -242,7 +242,8 @@ const CFG_DEFECTO = {
     {id:'taller', nombre:'Taller', tipo:'general', codigo:'', archivado:false}
   ],
   semaforo: {amarillo:7, rojo:2},
-  unidades: ['u','kg','m','m²','l','barra','chapa','juego','caja','hs']
+  unidades: ['u','kg','m','m²','l','barra','chapa','juego','caja','hs'],
+  dolarMet: 'oficial'   // dólar para pasar las OC en pesos a USD en métricas
 };
 
 // Estado general de la app en memoria
@@ -251,7 +252,8 @@ const S = {
   ocs:[], provs:[], form:null, detalleId:null, vista:'',
   filtros:{texto:'',estado:'',destino:'',proveedor:'',moneda:'',razon:'',desde:'',hasta:'',tile:''},
   verFiltros:false, logoTmp:{}, unsub:[],
-  esAdmin:false, nombre:'', usuarios:[], stock:{items:[],cfg:{}}, recs:[], precios:{}, matItem:0, metPeriodo:'anio'
+  esAdmin:false, nombre:'', usuarios:[], stock:{items:[],cfg:{}}, recs:[], precios:{}, matItem:0, metPeriodo:'anio',
+  dolar:{casa:'',hoy:null,serie:null,cargando:null,listo:false}, revTC:[]
 };
 
 // ===== Inicio de Firebase =====
@@ -513,7 +515,7 @@ function nuevaOC(base){
 }
 function editarOC(id){
   const o=S.ocs.find(x=>x.id===id); if(!o) return;
-  nuevaOC(JSON.parse(JSON.stringify({...o, tipoCambio:o.tipoCambio??'', items:(o.items||[]).map(i=>({...i}))})));
+  nuevaOC(JSON.parse(JSON.stringify({...o, tipoCambio:o.tipoCambio??'', tcMetricas:o.tcMetricas??'', tcManual:!!o.tcMetricas, items:(o.items||[]).map(i=>({...i}))})));
 }
 function duplicarOC(id){
   const o=S.ocs.find(x=>x.id===id); if(!o) return;
@@ -550,8 +552,11 @@ function renderForm(){
     <div class="fila">
       <div><label>Destino interno</label><select onchange="setF('destinoId',this.value)">${opcionesDestino(f.destinoId)}</select></div>
       <div><label>Moneda</label><select onchange="setF('moneda',this.value)"><option ${sel(f.moneda,'ARS')}>ARS</option><option ${sel(f.moneda,'USD')}>USD</option></select></div>
-      <div><label>Tipo de cambio ref. (opcional)</label><input type="number" inputmode="decimal" step="any" value="${f.tipoCambio??''}" placeholder="ARS por USD" oninput="setF('tipoCambio',this.value)"></div>
+      ${f.moneda==='USD'?`<div><label>Tipo de cambio ref. (opcional)</label><input type="number" inputmode="decimal" step="any" value="${f.tipoCambio??''}" placeholder="ARS por USD" oninput="setF('tipoCambio',this.value)"></div>`:''}
     </div>
+    ${f.moneda==='ARS'?`<div class="item" style="margin-top:12px"><label style="margin-top:0">Dólar para métricas (no sale en el PDF)</label>
+      <input type="number" id="f-tcmet" inputmode="decimal" step="any" value="${f.tcMetricas??''}" placeholder="ARS por USD" oninput="setF('tcMetricas',this.value)">
+      <div class="pista" id="f-tcmet-pista"></div></div>`:''}
   </div>
   <div class="card"><h3>Ítems</h3><div id="items"></div>
     <div class="acciones" style="margin-top:0"><button class="btn" onclick="agregarItem()">＋ Agregar ítem</button><button class="btn" onclick="modalPegar()">Pegar desde planilla</button></div></div>
@@ -571,7 +576,7 @@ function renderForm(){
     <button class="btn" id="b-guardar" onclick="guardarOC(false)">${f.id?'Guardar cambios':'Guardar borrador'}</button>
     ${f.estado==='borrador'?`<button class="btn pri" id="b-emitir" onclick="guardarOC(true)">Guardar y emitir</button>`:''}
   </div>`;
-  renderItems(); renderTotales();
+  renderItems(); renderTotales(); sugerirTC();
 }
 function opcionesUnidad(actual){ const u=[...S.cfg.unidades]; if(actual&&!u.includes(actual)) u.push(actual); return u.map(x=>`<option ${sel(x,actual)}>${esc(x)}</option>`).join(''); }
 function renderItems(){
@@ -617,7 +622,10 @@ function usarPrecio(i,v){ S.form.items[i].precioUnit=v; renderItems(); renderTot
 function desvincular(i){ const it=S.form.items[i]; it.stockId=''; it.area=''; renderItems(); }
 function setF(campo,valor){
   S.form[campo]=valor;
-  if(campo==='moneda'||campo==='tipoCambio'){ renderItems(); renderTotales(); }
+  if(campo==='moneda'){ renderForm(); return; }   // cambia qué campo de tipo de cambio se ve
+  if(campo==='tcMetricas'){ S.form.tcManual=true; pistaTC(); return; }
+  if(campo==='fechaEmision') pistaTC();
+  if(campo==='tipoCambio'){ renderItems(); renderTotales(); }
   if(campo==='discriminarIva'){ $('f-iva-sel').style.display=valor?'':'none'; renderTotales(); }
   if(campo==='ivaPct') renderTotales();
 }
@@ -712,6 +720,7 @@ function armarDatosOC(f){
     razonSnap:r?{nombre:r.nombre||'',cuit:r.cuit||'',domicilio:r.domicilio||'',telefono:r.telefono||'',mail:r.mail||'',iva:r.iva||''}:null,
     destinoId:f.destinoId||'', destinoSnap:d?{nombre:d.nombre,codigo:d.codigo||'',tipo:d.tipo||'general'}:null,
     moneda:f.moneda, tipoCambio:(f.tipoCambio===''||f.tipoCambio==null)?null:num(f.tipoCambio),
+    tcMetricas:f.moneda==='ARS'&&num(f.tcMetricas)>0?num(f.tcMetricas):null,
     items, discriminarIva:!!f.discriminarIva, ivaPct:num(f.ivaPct), ...t,
     condicionPago:f.condicionPago||'', lugarEntrega:f.lugarEntrega||'', observaciones:f.observaciones||'',
     textoBusqueda:[...items.map(i=>i.descripcion+' '+i.codigo), prov?prov.razonSocial:''].join(' ').toLowerCase(),
@@ -780,7 +789,7 @@ function renderDetalle(){
       ${p.telefono?`<a href="https://wa.me/${String(p.telefono).replace(/\D/g,'')}" target="_blank">${esc(p.telefono)}</a> `:''}${p.mail?` <a href="mailto:${esc(p.mail)}">${esc(p.mail)}</a>`:''}</div>
     <div style="margin-top:10px"><div class="muted">Facturar a</div>${esc(r.nombre||'—')}${r.cuit?' · CUIT '+esc(r.cuit):''}</div>
     <div style="margin-top:10px"><div class="muted">Destino</div>${esc(d.nombre||'—')}${d.codigo?' ('+esc(d.codigo)+')':''}</div>
-    ${o.tipoCambio?`<div style="margin-top:10px"><div class="muted">Tipo de cambio de referencia</div>$ ${fmtNum(o.tipoCambio)} por USD</div>`:''}
+    ${o.tipoCambio&&o.moneda==='USD'?`<div style="margin-top:10px"><div class="muted">Tipo de cambio de referencia</div>$ ${fmtNum(o.tipoCambio)} por USD</div>`:''}
   </div>
   <div class="card"><h3>Ítems</h3>
     <table class="tabla-items"><tr><th>#</th><th>Descripción</th><th class="der">Cant.</th><th class="der">Total</th></tr>
@@ -1038,11 +1047,81 @@ async function guardarRecepcion(id){
 }
 
 // =====================================================================
+// 8e) DÓLAR PARA MÉTRICAS (solo para comparar; no va al PDF ni a la OC)
+// =====================================================================
+const CASAS_DOLAR={oficial:'Oficial (BNA venta)',bolsa:'MEP',blue:'Blue'};
+function casaDolar(){ return (S.cfg&&S.cfg.dolarMet)||'oficial'; }
+// Descarga una vez por sesión el histórico (ArgentinaDatos) y el valor de hoy (DolarApi)
+function cargarDolar(){
+  const casa=casaDolar();
+  if(S.dolar.casa===casa && S.dolar.cargando) return S.dolar.cargando;
+  S.dolar={casa,hoy:null,serie:null,cargando:null,listo:false};
+  const getJ=u=>fetch(u).then(r=>{ if(!r.ok) throw new Error(r.status); return r.json(); });
+  S.dolar.cargando=Promise.allSettled([
+    getJ('https://api.argentinadatos.com/v1/cotizaciones/dolares/'+casa),
+    getJ('https://dolarapi.com/v1/dolares/'+casa)
+  ]).then(([h,a])=>{
+    if(h.status==='fulfilled'&&Array.isArray(h.value))
+      S.dolar.serie=h.value.filter(x=>num(x.venta)>0).map(x=>({f:String(x.fecha).slice(0,10),v:num(x.venta)})).sort((a,b)=>a.f.localeCompare(b.f));
+    if(a.status==='fulfilled'&&a.value&&num(a.value.venta)>0) S.dolar.hoy=num(a.value.venta);
+    S.dolar.listo=true; return S.dolar;
+  });
+  return S.dolar.cargando;
+}
+const hayDolarApi=()=>!!(S.dolar.hoy||(S.dolar.serie&&S.dolar.serie.length));
+// Dólar de una fecha (ese día o el último hábil anterior). Sin datos: el dólar de StockApp
+function dolarDe(fecha){
+  const d=S.dolar;
+  if((!fecha||fecha>=hoy()) && d.hoy) return d.hoy;
+  if(d.serie&&d.serie.length){ let v=null; for(const x of d.serie){ if(x.f<=fecha) v=x.v; else break; } if(v) return v; }
+  return num((S.stock.cfg||{}).dolar)||null;
+}
+// Dólar que usan las métricas para una OC en pesos
+function tcMet(o){ return num(o.tcMetricas)||num(o.tipoCambio)||dolarDe(o.fechaEmision); }
+function aUSD(o){ if(o.moneda==='USD') return num(o.total); const tc=tcMet(o); return tc?num(o.total)/tc:null; }
+// Sugerencia en el formulario: se completa sola mientras no lo cambies a mano
+function pistaTC(){
+  const f=S.form, el=$('f-tcmet-pista'); if(!f||!el) return;
+  const v=dolarDe(f.fechaEmision);
+  if(!v){ el.textContent=S.dolar.listo?'No se pudo obtener el dólar (¿sin internet?). Cargalo a mano.':'Buscando el dólar del día…'; return; }
+  const sug=redondear(v);
+  if(!f.tcManual){ f.tcMetricas=sug; if($('f-tcmet')) $('f-tcmet').value=sug; }
+  el.innerHTML=`${hayDolarApi()?`Dólar ${esc(CASAS_DOLAR[casaDolar()])} del ${fmtFecha(f.fechaEmision)}`:'Dólar cargado en StockApp'}: <b>$ ${fmtNum(v)}</b>`
+    +(f.tcManual&&num(f.tcMetricas)!==sug?` <button class="btn chico" onclick="usarTC(${sug})">Usar</button>`:'');
+}
+async function sugerirTC(){ if(!S.form||S.form.moneda!=='ARS') return; pistaTC(); await cargarDolar(); pistaTC(); }
+function usarTC(v){ S.form.tcMetricas=v; S.form.tcManual=false; if($('f-tcmet')) $('f-tcmet').value=v; pistaTC(); }
+// Revisión de OC en pesos (también las viejas)
+async function modalRevisarTC(){
+  abrirModal('<p class="muted centro">Buscando cotizaciones…</p>','ancho');
+  await cargarDolar();
+  const l=S.ocs.filter(o=>o.moneda==='ARS'&&o.estado!=='anulada').sort((a,b)=>(a.fechaEmision||'').localeCompare(b.fechaEmision||''));
+  S.revTC=l.map(o=>o.id);
+  abrirModal(`<h3>Dólar para métricas · OC en pesos</h3>
+    <p class="muted">Sugerido: dólar ${esc(CASAS_DOLAR[casaDolar()])} de la fecha de emisión. Corregí los que quieras y guardá. No cambia el PDF ni la OC.</p>
+    <label class="chk"><input type="checkbox" id="rt-solo" checked onchange="filtrarRevTC()">Mostrar solo las que no tienen dólar cargado</label>
+    ${l.length?`<table class="tabla-items"><tr><th>OC</th><th>Emisión</th><th class="der">Total</th><th class="der">Dólar</th></tr>
+    ${l.map((o,k)=>{ const sug=dolarDe(o.fechaEmision), v=num(o.tcMetricas)||num(o.tipoCambio)||(sug?redondear(sug):'');
+      return `<tr data-tiene="${num(o.tcMetricas)?1:0}"><td>${esc(o.numero)}</td><td>${fmtFecha(o.fechaEmision)}</td><td class="der">${fmtMon(o.total,'ARS')}</td>
+        <td class="der"><input id="rt-${k}" type="number" inputmode="decimal" step="any" value="${v}" style="width:110px;padding:6px 8px">${sug?`<div class="muted" style="font-size:12px">Sug. ${fmtNum(sug)}</div>`:''}</td></tr>`; }).join('')}</table>`
+    :'<div class="muted">No hay OC en pesos.</div>'}
+    <div class="acciones"><button class="btn" onclick="cerrarModal()">Cancelar</button><button class="btn pri" onclick="guardarRevTC()">Guardar</button></div>`,'ancho');
+  filtrarRevTC();
+}
+function filtrarRevTC(){ const solo=$('rt-solo')&&$('rt-solo').checked; document.querySelectorAll('#modal tr[data-tiene]').forEach(tr=>tr.hidden=solo&&tr.dataset.tiene==='1'); }
+async function guardarRevTC(){
+  const b=db.batch(); let n=0;
+  S.revTC.forEach((id,k)=>{ const o=S.ocs.find(x=>x.id===id), v=num(($('rt-'+k)||{}).value);
+    if(o&&v>0&&v!==num(o.tcMetricas)){ b.update(db.collection(COL.oc).doc(id),{tcMetricas:v}); n++; } });
+  if(!n) return toast('No hay cambios para guardar');
+  cerrarModal(); await escribir(b.commit(),`Dólar guardado en ${n} OC`);
+}
+
+// =====================================================================
 // 8d) MÉTRICAS
 // =====================================================================
 const fmtCorto = n => num(n).toLocaleString('es-AR',{notation:'compact',maximumFractionDigits:1});
 // Importe de una OC en pesos (USD × tipo de cambio de la OC o dólar de StockApp)
-function aARS(o){ if(o.moneda!=='USD') return num(o.total); const tc=num(o.tipoCambio)||num((S.stock.cfg||{}).dolar); return tc?num(o.total)*tc:null; }
 function desdePeriodo(p){
   const d=new Date(), f=x=>x.getFullYear()+'-'+String(x.getMonth()+1).padStart(2,'0')+'-01';
   if(p==='mes') return f(d);
@@ -1053,17 +1132,18 @@ function desdePeriodo(p){
 function barrasH(lista){
   if(!lista.length) return '<div class="muted">Sin datos en este período.</div>';
   const max=Math.max(...lista.map(x=>x.v),1);
-  return `<div class="barras">${lista.map(x=>`<div class="barra-f"><span class="nom">${esc(x.n)}</span><span class="val">$ ${fmtCorto(x.v)}</span>
+  return `<div class="barras">${lista.map(x=>`<div class="barra-f"><span class="nom">${esc(x.n)}</span><span class="val">US$ ${fmtCorto(x.v)}</span>
     <span class="pista-b"><i style="width:${Math.max(1,x.v/max*100)}%"></i></span></div>`).join('')}</div>`;
 }
 function agrupar(ocs,clave){
-  const m={}; ocs.forEach(o=>{ const v=aARS(o); if(v==null) return; const k=clave(o)||'Sin dato'; m[k]=(m[k]||0)+v; });
+  const m={}; ocs.forEach(o=>{ const v=aUSD(o); if(v==null) return; const k=clave(o)||'Sin dato'; m[k]=(m[k]||0)+v; });
   const l=Object.entries(m).map(([n,v])=>({n,v})).sort((a,b)=>b.v-a.v);
   if(l.length>8){ const otros=l.slice(7).reduce((s,x)=>s+x.v,0); return [...l.slice(0,7),{n:'Otros',v:otros}]; }
   return l;
 }
 function renderMetricas(){
   const el=$('v-metricas'); if(!S.cfg){ el.innerHTML='<p class="muted centro">Cargando…</p>'; return; }
+  if(!(S.dolar.casa===casaDolar()&&S.dolar.cargando)) cargarDolar().then(()=>{ if(S.vista==='metricas') renderMetricas(); });
   const P={mes:'Este mes',tres:'Últimos 3 meses',anio:'Este año',todo:'Todo'}, desde=desdePeriodo(S.metPeriodo);
   const base=S.ocs.filter(o=>o.estado!=='anulada'&&(!desde||o.fechaEmision>=desde));
   const grupos=[
@@ -1074,25 +1154,28 @@ function renderMetricas(){
     {t:'Pagadas', c:'ok', l:base.filter(o=>o.estado==='pagada')}
   ];
   const suma=(l,mon)=>l.filter(o=>o.moneda===mon).reduce((s,o)=>s+num(o.total),0);
-  const emit=grupos[0].l, sinTC=emit.filter(o=>aARS(o)==null).length, totARS=emit.reduce((s,o)=>s+(aARS(o)||0),0);
+  const sumaUSD=l=>l.reduce((s,o)=>s+(aUSD(o)||0),0);
+  const emit=grupos[0].l, sinTC=emit.filter(o=>aUSD(o)==null).length, totUSD=sumaUSD(emit);
+  const estim=emit.filter(o=>o.moneda==='ARS'&&!num(o.tcMetricas)&&!num(o.tipoCambio)).length;
   // últimos 12 meses (siempre, sin importar el período elegido)
   const hoyD=new Date(), meses=[];
   for(let k=11;k>=0;k--){ const d=new Date(hoyD.getFullYear(),hoyD.getMonth()-k,1); meses.push({k:d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'),m:d.toLocaleDateString('es-AR',{month:'short'}).replace('.',''),v:0}); }
-  S.ocs.filter(o=>!['anulada','borrador'].includes(o.estado)).forEach(o=>{ const x=meses.find(m=>m.k===(o.fechaEmision||'').slice(0,7)); const v=aARS(o); if(x&&v!=null) x.v+=v; });
+  S.ocs.filter(o=>!['anulada','borrador'].includes(o.estado)).forEach(o=>{ const x=meses.find(m=>m.k===(o.fechaEmision||'').slice(0,7)); const v=aUSD(o); if(x&&v!=null) x.v+=v; });
   const maxM=Math.max(...meses.map(m=>m.v),1);
   el.innerHTML=`<h2 class="titulo-sec">Métricas</h2>
     <div class="periodos">${Object.entries(P).map(([k,n])=>`<button class="btn chico ${S.metPeriodo===k?'activo':''}" onclick="S.metPeriodo='${k}';renderMetricas()">${n}</button>`).join('')}</div>
     <div class="tiles">${grupos.map(g=>`<div class="tile t-${g.c}" style="cursor:default">
       <span class="tile-lbl">${g.t}</span><span class="tile-num">${g.l.length}</span>
-      <span class="met-mon">$ ${fmtNum(suma(g.l,'ARS'),0)}</span><span class="met-mon">US$ ${fmtNum(suma(g.l,'USD'),0)}</span>
+      <span class="met-mon"><b>US$ ${fmtNum(sumaUSD(g.l),0)}</b></span>
+      <span class="tile-sub">$ ${fmtNum(suma(g.l,'ARS'),0)} + US$ ${fmtNum(suma(g.l,'USD'),0)}</span>
       ${g.s?`<span class="tile-sub">${g.s}</span>`:''}</div>`).join('')}
-      <div class="tile" style="cursor:default"><span class="tile-lbl">Total en pesos</span><span class="tile-num" style="font-size:28px">$ ${fmtCorto(totARS)}</span>
-      <span class="tile-sub">Emitidas, con USD pasados a pesos${sinTC?` · ${sinTC} OC en USD sin tipo de cambio`:''}</span></div></div>
+      <div class="tile" style="cursor:default"><span class="tile-lbl">Total en dólares</span><span class="tile-num" style="font-size:28px">US$ ${fmtCorto(totUSD)}</span>
+      <span class="tile-sub">Emitidas, con pesos pasados a dólares${estim?` · ${estim} con dólar estimado`:''}${sinTC?` · ${sinTC} sin dólar`:''}</span></div></div>
     <div class="card"><h3>Por destino o proyecto</h3>${barrasH(agrupar(emit,o=>o.destinoSnap?(o.destinoSnap.nombre+(o.destinoSnap.codigo?' ('+o.destinoSnap.codigo+')':'')):''))}</div>
     <div class="card"><h3>Por proveedor</h3>${barrasH(agrupar(emit,o=>(o.proveedorSnap||{}).razonSocial))}</div>
     <div class="card"><h3>Por mes · últimos 12 meses</h3>
-      <div class="meses">${meses.map((m,k)=>`<div class="mes ${k===11?'actual':''}" title="${m.m}: $ ${fmtNum(m.v,0)}"><span class="v">${m.v?fmtCorto(m.v):''}</span><span class="col" style="height:${m.v?Math.max(2,m.v/maxM*110):1}px"></span><span class="m">${m.m}</span></div>`).join('')}</div>
-      <p class="muted" style="margin:8px 0 0">Montos en pesos de las OC emitidas (sin borradores ni anuladas). Los dólares se pasan con el tipo de cambio de cada OC o, si no tiene, con el dólar cargado en StockApp.</p></div>`;
+      <div class="meses">${meses.map((m,k)=>`<div class="mes ${k===11?'actual':''}" title="${m.m}: US$ ${fmtNum(m.v,0)}"><span class="v">${m.v?fmtCorto(m.v):''}</span><span class="col" style="height:${m.v?Math.max(2,m.v/maxM*110):1}px"></span><span class="m">${m.m}</span></div>`).join('')}</div>
+      <p class="muted" style="margin:8px 0 0">Montos en dólares de las OC emitidas (sin borradores ni anuladas). Las OC en pesos se pasan con su "dólar para métricas" o, si no lo tienen, con el dólar ${esc(CASAS_DOLAR[casaDolar()])} de su fecha de emisión (estimado).</p></div>`;
 }
 
 // =====================================================================
@@ -1131,7 +1214,7 @@ function generarPDF(o){
   doc.setFontSize(9.5); lp.forEach((l,i)=>{ doc.setFont('helvetica',i===0?'bold':'normal'); doc.text(l,M+3,y+9+i*4.5); });
   y+=hP+5;
   doc.setFont('helvetica','normal'); doc.setFontSize(9);
-  doc.text(`Moneda: ${m==='USD'?'Dólares (USD)':'Pesos (ARS)'}${o.tipoCambio?'     T.C. ref.: $ '+fmtNum(o.tipoCambio):''}`,M,y);
+  doc.text(`Moneda: ${m==='USD'?'Dólares (USD)':'Pesos (ARS)'}${o.tipoCambio&&m==='USD'?'     T.C. ref.: $ '+fmtNum(o.tipoCambio):''}`,M,y);
   y+=4;
   // Tabla de ítems
   doc.autoTable({
@@ -1327,6 +1410,12 @@ function renderConfig(){
     <p class="muted">Verde: faltan más días que "amarillo". Amarillo: entre "rojo" y "amarillo". Rojo: igual o menos que "rojo", o vencida.</p>
     <div class="fila"><div><label>Amarillo desde (días)</label><input type="number" inputmode="numeric" id="s-am" value="${c.semaforo.amarillo}"></div><div><label>Rojo desde (días)</label><input type="number" inputmode="numeric" id="s-ro" value="${c.semaforo.rojo}"></div></div>
     <div class="acciones"><button class="btn pri" onclick="guardarSemaforo()">Guardar</button></div>
+  </details>
+  <details class="card"><summary>Métricas</summary>
+    <p class="muted">Las OC en pesos se pasan a dólares para comparar sin el efecto de la devaluación. Esto no cambia el PDF ni la OC.</p>
+    <label>Dólar a usar</label>
+    <select onchange="guardarCfg({dolarMet:this.value},'Dólar para métricas actualizado')">${Object.entries(CASAS_DOLAR).map(([k,n])=>`<option value="${k}" ${sel(c.dolarMet||'oficial',k)}>${n}</option>`).join('')}</select>
+    <div class="acciones"><button class="btn" onclick="modalRevisarTC()">Revisar dólar de OC en pesos</button></div>
   </details>
   <details class="card"><summary>Unidades de medida</summary>
     ${c.unidades.map((u,i)=>`<span class="chip">${esc(u)}<button onclick="quitarUnidad(${i})">✕</button></span>`).join('')}

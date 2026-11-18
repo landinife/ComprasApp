@@ -291,7 +291,7 @@ const S = {
   ocs:[], provs:[], form:null, detalleId:null, vista:'',
   filtros:{texto:'',estado:'',destino:'',proveedor:'',moneda:'',razon:'',desde:'',hasta:'',tile:''},
   verFiltros:false, logoTmp:{}, unsub:[],
-  esAdmin:false, nombre:'', usuarios:[], reservas:[], resListas:false, stock:{items:[],cfg:{}}, recs:[], precios:{}, matItem:0, metPeriodo:'anio',
+  esAdmin:false, nombre:'', usuarios:[], reservas:[], resListas:false, vinc:{}, stock:{items:[],cfg:{}}, recs:[], precios:{}, matItem:0, metPeriodo:'anio',
   dolar:{casa:'',hoy:null,serie:null,cargando:null,listo:false}, revTC:[]
 };
 
@@ -415,6 +415,8 @@ function iniciarDatos(){
     if(!q.metadata.fromCache){ S.resListas=true; migrarReservas(); }
     refrescar(['inicio','config','detalle']);
   },errorFS));
+  // Vínculos guardados: descripción de la OC → material de StockApp (se aplican solos en las OC nuevas)
+  S.unsub.push(db.doc(COL.cfg+'/vinculos').onSnapshot(d=>{ S.vinc=(d.data()||{}).map||{}; refrescar(['config']); },errorFS));
   S.unsub.push(db.collection(COL.precios).onSnapshot(q=>{ S.precios={}; q.docs.forEach(d=>S.precios[d.id]=d.data()); },errorFS));
   S.unsub.push(db.collection(COL.oc).onSnapshot(q=>{
     S.ocs=q.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>b.id.localeCompare(a.id));
@@ -688,7 +690,7 @@ function renderItems(){
     <div class="item-h"><span>Ítem ${i+1}</span>${f.items.length>1?`<button class="btn chico peligro" onclick="quitarItem(${i})">Quitar</button>`:''}</div>
     ${v?`<div class="vinculo"><span class="badge emitida">StockApp · ${esc(it.codigo)}</span><button class="btn chico" onclick="desvincular(${i})">Desvincular</button></div>`
        :`<button class="btn chico" style="margin-top:8px" onclick="modalMaterial(${i})">Elegir material de StockApp</button>`}
-    <label>Descripción</label><input value="${esc(it.descripcion)}" ${v?'readonly':''} oninput="setItem(${i},'descripcion',this.value)">
+    <label>Descripción</label><input value="${esc(it.descripcion)}" ${v?'readonly':''} oninput="setItem(${i},'descripcion',this.value)" onchange="autoVincularItem(${i})">
     <div class="fila">
       <div><label>Código${v?'':' (opcional)'}</label><input value="${esc(it.codigo)}" ${v?'readonly':''} oninput="setItem(${i},'codigo',this.value)"></div>
       <div><label>Unidad</label><select ${v?'disabled':''} onchange="setItem(${i},'unidad',this.value)">${opcionesUnidad(it.unidad)}</select></div>
@@ -779,8 +781,10 @@ function agregarPegados(){
   f.items=f.items.filter(it=>!vacio(it));
   l.forEach(r=>f.items.push({...itemVacio(), descripcion:r.descripcion, unidad:r.unidad,
     cantidad:isNaN(r.cantidad)?0:r.cantidad, precioUnit:isNaN(r.precioUnit)?0:r.precioUnit}));
+  let nv=0; f.items.forEach(it=>{ if(autoVincular(it)) nv++; });
   cerrarModal(); renderItems(); renderTotales();
-  toast(`${l.length} ítem${l.length===1?'':'s'} agregado${l.length===1?'':'s'}`);
+  const sinV=f.items.filter(it=>!it.stockId&&String(it.descripcion).trim()).length;
+  toast(`${l.length} ítem${l.length===1?'':'s'} agregado${l.length===1?'':'s'}`+(nv?` · ${nv} vinculado${nv===1?'':'s'} con StockApp`:'')+(sinV?` · ${sinV} sin vincular`:''),4000);
 }
 // Calcula subtotal, IVA y total
 function calcTotales(f){
@@ -809,6 +813,7 @@ function armarDatosOC(f){
   const prov=S.provs.find(p=>p.id===f.proveedorId)||f.proveedorSnap||null;
   const r=S.cfg.razones.find(x=>x.id===f.razonId)||null;
   const d=reservaDe(f.destinoId)||f.destinoSnap||null;
+  (f.items||[]).forEach(autoVincular);
   const items=(f.items||[]).filter(it=>String(it.descripcion||'').trim()||num(it.precioUnit)).map((it,i)=>({
     n:i+1, codigo:String(it.codigo||'').trim(), descripcion:String(it.descripcion||'').trim(),
     cantidad:num(it.cantidad), unidad:it.unidad||'', precioUnit:num(it.precioUnit),
@@ -897,7 +902,8 @@ function renderDetalle(){
   </div>
   <div class="card"><h3>Ítems</h3>
     <table class="tabla-items"><tr><th>#</th><th>Descripción</th><th class="der">Cant.</th><th class="der">Total</th></tr>
-    ${(o.items||[]).map(it=>`<tr><td>${it.n}</td><td>${esc(it.descripcion)}${it.codigo?`<div class="muted">Cód. ${esc(it.codigo)}${it.stockId?' · StockApp':''}</div>`:''}<div class="muted">${fmtMon(it.precioUnit,m)} / ${esc(it.unidad)}</div>${o.resPorItem?`<div class="muted">Reserva: ${esc((resItem(o,it)||{}).nombre||'libre uso')}</div>`:''}${num(it.cantRecibida)>0?`<div class="${num(it.cantRecibida)>=num(it.cantidad)?'txt-verde':'txt-amarillo'}" style="font-size:14px">Recibido ${fmtCant(it.cantRecibida)} de ${fmtCant(it.cantidad)}</div>`:''}</td><td class="der">${fmtCant(it.cantidad)} ${esc(it.unidad)}</td><td class="der">${fmtMon(it.total,m)}</td></tr>`).join('')}
+    ${(o.items||[]).map((it,k)=>`<tr><td>${it.n}</td><td>${esc(it.descripcion)}${it.codigo?`<div class="muted">Cód. ${esc(it.codigo)}${it.stockId?' · StockApp':''}</div>`:''}${!it.stockId&&o.estado!=='anulada'?`<div><button class="btn chico" style="margin:4px 0" onclick="modalVincular('${o.id}',${k})">Vincular con StockApp</button></div>`
+      :it.stockId&&!(num(it.cantRecibida)>0)&&o.estado!=='anulada'?`<div><button class="btn chico" style="margin:4px 0" onclick="modalVincular('${o.id}',${k})">Cambiar vínculo</button></div>`:''}<div class="muted">${fmtMon(it.precioUnit,m)} / ${esc(it.unidad)}</div>${o.resPorItem?`<div class="muted">Reserva: ${esc((resItem(o,it)||{}).nombre||'libre uso')}</div>`:''}${num(it.cantRecibida)>0?`<div class="${num(it.cantRecibida)>=num(it.cantidad)?'txt-verde':'txt-amarillo'}" style="font-size:14px">Recibido ${fmtCant(it.cantRecibida)} de ${fmtCant(it.cantidad)}</div>`:''}</td><td class="der">${fmtCant(it.cantidad)} ${esc(it.unidad)}</td><td class="der">${fmtMon(it.total,m)}</td></tr>`).join('')}
     </table>
     <div class="totales" style="margin-top:10px">${o.discriminarIva
       ?`<div><span>Subtotal neto</span><span>${fmtMon(o.subtotal,m)}</span></div><div><span>IVA ${String(o.ivaPct).replace('.',',')} %</span><span>${fmtMon(o.iva,m)}</span></div>`:''}
@@ -1032,6 +1038,8 @@ function listaMateriales(){
 }
 function elegirMaterial(id,datos){
   const m=datos||S.stock.items.find(x=>x.id===id), it=S.form&&S.form.items[S.matItem]; if(!m||!it) return;
+  const antes=String(it.descripcion||'').trim();
+  if(antes&&claveVinc(antes)!==claveVinc(descMaterial(m))) recordarVinculo(antes,{...m,id});   // la próxima vez esa descripción se vincula sola
   Object.assign(it,{stockId:id, area:m.area, codigo:m.codigo, descripcion:descMaterial(m), unidad:m.unidad||it.unidad});
   // si no tiene precio, toma el último pagado a este proveedor (misma moneda)
   const pr=S.form.proveedorId&&S.precios[idPrecio(S.form.proveedorId,it)];
@@ -1097,6 +1105,105 @@ async function crearItemStock(base){
 }
 
 // =====================================================================
+// 8b2) VINCULAR DESPUÉS un ítem de la OC con un material de StockApp
+// (ítems pegados o escritos a mano). Si ya se recibió algo, permite cargarlo al stock.
+// =====================================================================
+// ---- Memoria de vínculos (una vez vinculado, queda para siempre; se puede cambiar u olvidar) ----
+const claveVinc = d => normTxt(d).slice(0,140);
+function recordarVinculo(desc,m){
+  const k=claveVinc(desc); if(!k||!m) return;
+  if(S.vinc[k]&&S.vinc[k].stockId===m.id) return;
+  S.vinc[k]={stockId:m.id,codigo:m.codigo,desc:String(desc).trim(),fecha:Date.now()};
+  db.doc(COL.cfg+'/vinculos').set({map:{[k]:S.vinc[k]}},{merge:true}).catch(errorFS);
+}
+// Material que corresponde a una descripción: el vínculo guardado o, si no hay, el de StockApp con la misma descripción
+function materialPara(desc){
+  const k=claveVinc(desc); if(!k) return null;
+  const v=S.vinc[k], m=v&&S.stock.items.find(x=>x.id===v.stockId); if(m) return m;
+  return S.stock.items.find(x=>claveVinc(x.descripcion)===k||claveVinc(descMaterial(x))===k)||null;
+}
+// Vincula solo un ítem sin vínculo si encuentra su material; devuelve true si lo vinculó
+function autoVincular(it){
+  if(it.stockId||!String(it.descripcion||'').trim()) return false;
+  const m=materialPara(it.descripcion); if(!m) return false;
+  Object.assign(it,{stockId:m.id,area:m.area,codigo:m.codigo,unidad:m.unidad||it.unidad}); return true;
+}
+function autoVincularItem(i){ if(S.form&&autoVincular(S.form.items[i])){ renderItems(); renderTotales(); toast('Ítem '+(i+1)+' vinculado a '+S.form.items[i].codigo); } }
+let VINC_KEYS=[];
+async function olvidarVinculo(i){
+  const k=VINC_KEYS[i], v=S.vinc[k]; if(!v||!confirm(`¿Olvidar el vínculo "${v.desc}" → ${v.codigo}? Las OC ya hechas no cambian.`)) return;
+  const resto={...S.vinc}; delete resto[k];
+  await escribir(db.doc(COL.cfg+'/vinculos').set({map:resto}),'Vínculo olvidado');
+}
+// Parecido entre dos textos: palabras en común (sirve para sugerir el material)
+function parecido(a,b){ const A=normTxt(a).split(/[\s\-·,/]+/).filter(x=>x.length>1), B=new Set(normTxt(b).split(/[\s\-·,/]+/)); if(!A.length) return 0; return A.filter(x=>B.has(x)).length/A.length; }
+function sugeridosPara(it){
+  return S.stock.items.map(m=>({m,p:Math.max(parecido(it.descripcion,m.descripcion),parecido(m.descripcion,it.descripcion),it.codigo&&it.codigo===m.codigo?1:0)}))
+    .filter(x=>x.p>=0.5).sort((a,b)=>b.p-a.p).slice(0,5).map(x=>x.m);
+}
+let VINC={oc:'',k:0};
+function modalVincular(ocId,k){
+  VINC={oc:ocId,k}; const o=S.ocs.find(x=>x.id===ocId), it=o.items[k], g=materialPara(it.descripcion);
+  const sug=[...(g?[g]:[]),...sugeridosPara(it).filter(x=>!g||x.id!==g.id)].filter(x=>x.id!==it.stockId).slice(0,5);
+  abrirModal(`<h3>${it.stockId?'Cambiar vínculo del':'Vincular'} ítem ${it.n}${it.stockId?'':' con StockApp'}</h3>
+    ${it.stockId?`<p class="muted">Ahora: <b>${esc(it.codigo)}</b>. Elegí el material correcto.</p>`:''}
+    <div class="item"><b>${esc(it.descripcion)}</b><div class="muted">${fmtCant(it.cantidad)} ${esc(it.unidad)}${num(it.cantRecibida)>0?` · recibido ${fmtCant(it.cantRecibida)}`:''}</div></div>
+    ${sug.length?`<div class="muted" style="margin:10px 0 4px;font-weight:600">Sugeridos</div><div class="lista-sel">${sug.map(filaMatVinc).join('')}</div>`:''}
+    <label for="vc-buscar">Buscar otro material</label><input id="vc-buscar" type="search" placeholder="Código, descripción o material" oninput="listaVinc()">
+    <div class="lista-sel" id="vc-lista" style="margin-top:8px"></div>
+    <p class="muted">Si el material no existe, crealo primero en StockApp y después vinculalo acá.</p>
+    <div class="acciones"><button class="btn" onclick="cerrarModal()">Cancelar</button></div>`);
+}
+function filaMatVinc(m){ return `<div onclick="confirmarVinculo('${m.id}')"><b>${esc(m.codigo)}</b> ${esc(m.descripcion)}<div class="muted">${esc((AREAS[m.area]||{}).n||'')} · Stock ${fmtCant(m.stock)} ${esc(m.unidad||'')}</div></div>`; }
+function listaVinc(){
+  const pal=normTxt($('vc-buscar').value).split(' ').filter(Boolean);
+  if(!pal.length){ $('vc-lista').innerHTML=''; return; }
+  const l=S.stock.items.filter(m=>{ const t=normTxt([m.codigo,m.descripcion,m.material,m.formato].join(' ')); return pal.every(p=>t.includes(p)); })
+    .sort((a,b)=>String(a.codigo).localeCompare(String(b.codigo),'es',{numeric:true})).slice(0,40);
+  $('vc-lista').innerHTML=l.map(filaMatVinc).join('')||'<div class="muted">No hay materiales que coincidan.</div>';
+}
+function confirmarVinculo(mid){
+  const o=S.ocs.find(x=>x.id===VINC.oc), it=o.items[VINC.k], m=S.stock.items.find(x=>x.id===mid); if(!m) return;
+  const rec=num(it.cantRecibida), r=resItem(o,it), otraU=it.unidad&&m.unidad&&normTxt(it.unidad)!==normTxt(m.unidad);
+  abrirModal(`<h3>Confirmar vínculo</h3>
+    <div class="item"><div class="muted">Ítem ${it.n} de ${esc(o.numero)}</div><b>${esc(it.descripcion)}</b>
+      <div style="margin-top:8px" class="muted">se vincula con</div><b>${esc(m.codigo)} · ${esc(m.descripcion)}</b></div>
+    <p class="muted">El vínculo queda guardado en la OC: las próximas recepciones de este ítem van directo a StockApp. La descripción de la OC no cambia${otraU?`; la unidad pasa de "${esc(it.unidad)}" a "${esc(m.unidad)}" (la de StockApp)`:''}.</p>
+    ${rec>0?`<label class="chk"><input type="checkbox" id="vc-stock" checked><span>Cargar al stock lo ya recibido: <b>${fmtCant(rec)} ${esc(m.unidad||it.unidad)}</b></span></label>
+      <label class="chk"><input type="checkbox" id="vc-costo" checked><span>Actualizar el costo con el precio de esta OC</span></label>
+      <label for="vc-res">Reservar lo recibido para</label><select id="vc-res">${opcionesDestino(r?r.id:'-','rec',r)}</select>`:''}
+    <div class="acciones"><button class="btn" onclick="modalVincular('${o.id}',${VINC.k})">Volver</button><button class="btn pri" id="vc-ok" onclick="guardarVinculo('${mid}')">Vincular</button></div>`);
+}
+async function guardarVinculo(mid){
+  const o=S.ocs.find(x=>x.id===VINC.oc), k=VINC.k, it=o.items[k], m=S.stock.items.find(x=>x.id===mid); if(!o||!m) return;
+  const rec=num(it.cantRecibida), alStock=rec>0&&$('vc-stock')&&$('vc-stock').checked, conCosto=alStock&&$('vc-costo')&&$('vc-costo').checked;
+  const rv=alStock&&$('vc-res')?$('vc-res').value:'-', res=rv&&rv!=='-'?(reservaDe(rv)||resItem(o,it)):null;
+  const items=o.items.map((x,i)=>i===k?{...x,stockId:m.id,codigo:m.codigo,area:m.area,unidad:m.unidad||x.unidad}:x);
+  recordarVinculo(it.descripcion,m);
+  const b=db.batch(), patch={actualizado:Date.now()}, movs=[];
+  const ant=it.stockId&&it.stockId!==m.id&&S.stock.items.find(x=>x.id===it.stockId);
+  if(ant&&ant.pedidoCurso&&ant.pedidoCurso.oc===o.numero) b.set(db.collection(SCOL.items).doc(ant.id),{pedidoCurso:null,actualizado:Date.now()},{merge:true});
+  if(alStock){
+    const mref=db.collection(SCOL.movs).doc(); movs.push(mref.id);
+    b.set(mref,{itemId:m.id,codigo:m.codigo,descripcion:m.descripcion,area:m.area,unidad:m.unidad,tipo:'entrada',cantidad:rec,motivo:'Compra',ref:o.numero+' · recibido antes de vincular',
+      usuario:S.nombre,email:S.email,fecha:Date.now(),stockRes:r3(num(m.stock)+rec),origen:'ComprasApp',ocId:o.id});
+    patch.stock=firebase.firestore.FieldValue.increment(rec);
+    if(conCosto&&num(it.precioUnit)>0){ patch.costo=costoNeto(it.precioUnit,o); patch.moneda=o.moneda; }
+    if(res) patch.reservas=[...(m.reservas||[]),{id:'r'+Date.now().toString(36),destino:res.nombre,reservaId:res.id,cantidad:rec,fecha:Date.now(),usuario:S.nombre,origen:'ComprasApp',oc:o.numero}];
+  }
+  // si todavía falta recibir, queda como "pedido en curso" en StockApp
+  if(['emitida','parcial'].includes(o.estado) && rec<num(it.cantidad)) patch.pedidoCurso={fecha:Date.now(),cantidad:num(it.cantidad)-rec,oc:o.numero};
+  b.set(db.collection(SCOL.items).doc(m.id),patch,{merge:true});
+  if(alStock) b.set(db.collection(COL.rec).doc(),{ocId:o.id,numero:o.numero,fecha:hoy(),remito:'',obs:'Ingreso al vincular el ítem '+it.n+' con StockApp',alStock:true,movimientos:movs,
+    reservaId:res?'si':'',usuario:S.email,creado:ts(),items:[{n:it.n,codigo:m.codigo,stockId:m.id,descripcion:it.descripcion,unidad:m.unidad||it.unidad,cantidad:rec,reserva:res?res.nombre:''}]});
+  b.update(db.collection(COL.oc).doc(o.id),{items,actualizado:ts(),actualizadoPor:S.email,
+    historial:firebase.firestore.FieldValue.arrayUnion(entradaHist(o.estado,'Ítem '+it.n+' vinculado a '+m.codigo+(alStock?' · '+fmtCant(rec)+' ingresado a StockApp':'')+(res?' · reservado para '+res.nombre:'')))});
+  if($('vc-ok')) $('vc-ok').disabled=true;
+  cerrarModal();
+  await escribir(b.commit(),'Ítem '+it.n+' vinculado a '+m.codigo+(alStock?' · stock cargado':''));
+}
+
+// =====================================================================
 // 8c) RECEPCIÓN POR ÍTEM (remitos) e ingreso a StockApp
 // =====================================================================
 function recepcionesDe(o){
@@ -1128,6 +1235,7 @@ function modalRecepcion(id){
     ${hayStock?`<label class="chk"><input type="checkbox" id="r-stock" checked>Ingresar al stock de StockApp los ítems con código</label>
       <label class="chk"><input type="checkbox" id="r-costo" checked>Actualizar el costo en StockApp con el precio de esta OC</label>
       <div class="pista">Podés repartir un ítem entre reservas recibiéndolo en partes: cada recepción con su reserva.</div>`:''}
+    ${its.some(i=>!i.stockId)?`<div class="pista txt-amarillo">${its.filter(i=>!i.stockId).length} ítem(s) sin vincular con StockApp: no entran al stock. Podés vincularlos desde el detalle de la OC (también después de recibir).</div>`:''}
     <label for="r-obs">Observaciones (opcional)</label><input id="r-obs">
     <div class="acciones"><button class="btn" onclick="cerrarModal()">Cancelar</button><button class="btn pri" onclick="guardarRecepcion('${id}')">Guardar recepción</button></div>`);
 }
@@ -1540,6 +1648,13 @@ function renderConfig(){
         <div><label for="d-cliente">Cliente</label><input id="d-cliente" placeholder="Ej.: Granja Tres Arroyos"></div>
         <div><label for="d-codigo">Código (opcional)</label><input id="d-codigo" placeholder="Ej.: OV 1234"></div></div>
       <div class="acciones"><button class="btn pri" onclick="agregarReserva()">＋ Agregar reserva</button></div></div>
+  </details>
+  <details class="card"><summary>Vínculos con StockApp</summary>
+    <p class="muted">Descripciones de OC que ya vinculaste con un material: al pegarlas o escribirlas en una OC nueva se vinculan solas. Si alguno está mal, olvidalo y volvé a vincularlo.</p>
+    ${(VINC_KEYS=Object.keys(S.vinc).sort((a,b)=>String(S.vinc[a].desc).localeCompare(String(S.vinc[b].desc),'es'))).length?VINC_KEYS.map((k,i)=>{ const v=S.vinc[k], m=S.stock.items.find(x=>x.id===v.stockId);
+      return `<div class="item" style="display:flex;justify-content:space-between;align-items:center;gap:8px"><div style="min-width:0"><b>${esc(v.desc)}</b><div class="muted">→ ${esc(m?m.codigo+' · '+m.descripcion:(v.codigo||'')+' (ya no existe en StockApp)')}</div></div>
+        <button class="btn chico peligro" style="flex:0 0 auto" onclick="olvidarVinculo(${i})">Olvidar</button></div>`; }).join('')
+      :'<div class="muted">Todavía no hay vínculos guardados. Se guardan al vincular un ítem de una OC con un material.</div>'}
   </details>
   <details class="card"><summary>Semáforo</summary>
     <p class="muted">Verde: faltan más días que "amarillo". Amarillo: entre "rojo" y "amarillo". Rojo: igual o menos que "rojo", o vencida.</p>

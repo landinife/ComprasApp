@@ -254,6 +254,11 @@ const COL = {
   rec: 'compras_recepciones',     // FASE 2/3: recepciones por ítem / remitos
   precios: 'compras_precios'      // historial de precios por ítem y proveedor
 };
+// Reservas: lista única para toda la empresa (StockApp, ComprasApp y ProducciónApp), un documento por reserva
+const RES_COL = 'empresa_reservas';
+const TIPOS_RES = {proyecto:'Proyecto', repuesto:'Repuesto'};
+const tipoRes = r => r&&r.tipo==='repuesto' ? 'repuesto' : 'proyecto';
+const LIBRE = 'Sin reserva (stock de libre uso)';
 // Colecciones de StockApp que usa ComprasApp (mismo proyecto de Firebase)
 const SCOL = { items:'stockapp_items', movs:'stockapp_movimientos', cfg:'stockapp_config', usuarios:'stockapp_usuarios' };
 // Administrador: el mismo de StockApp y de las reglas de Firebase
@@ -275,10 +280,6 @@ const COND_IVA = ['Responsable Inscripto','Monotributista','Exento','Consumidor 
 
 const CFG_DEFECTO = {
   razones: [],
-  destinos: [
-    {id:'stock', nombre:'Stock', tipo:'general', codigo:'', archivado:false},
-    {id:'taller', nombre:'Taller', tipo:'general', codigo:'', archivado:false}
-  ],
   semaforo: {amarillo:7, rojo:2},
   unidades: ['u','kg','m','m²','l','barra','chapa','juego','caja','hs'],
   dolarMet: 'oficial'   // dólar para pasar las OC en pesos a USD en métricas
@@ -290,7 +291,7 @@ const S = {
   ocs:[], provs:[], form:null, detalleId:null, vista:'',
   filtros:{texto:'',estado:'',destino:'',proveedor:'',moneda:'',razon:'',desde:'',hasta:'',tile:''},
   verFiltros:false, logoTmp:{}, unsub:[],
-  esAdmin:false, nombre:'', usuarios:[], stock:{items:[],cfg:{}}, recs:[], precios:{}, matItem:0, metPeriodo:'anio',
+  esAdmin:false, nombre:'', usuarios:[], reservas:[], resListas:false, stock:{items:[],cfg:{}}, recs:[], precios:{}, matItem:0, metPeriodo:'anio',
   dolar:{casa:'',hoy:null,serie:null,cargando:null,listo:false}, revTC:[]
 };
 
@@ -400,6 +401,7 @@ function iniciarDatos(){
     const x=d.data()||{};
     S.cfg={...CFG_DEFECTO,...x, semaforo:{...CFG_DEFECTO.semaforo,...(x.semaforo||{})}};
     refrescar(['inicio','config','detalle']);
+    if(!d.metadata.fromCache) migrarReservas();
   },errorFS));
   // Datos de StockApp: materiales, su configuración y usuarios
   S.unsub.push(db.collection(SCOL.items).onSnapshot(q=>{ S.stock.items=q.docs.map(d=>({id:d.id,...d.data()})); },errorFS));
@@ -407,6 +409,12 @@ function iniciarDatos(){
   S.unsub.push(db.collection(SCOL.usuarios).onSnapshot(q=>{ S.usuarios=q.docs.map(d=>({email:d.id,...d.data()})); refrescar(['config']); },()=>{}));
   // Recepciones e historial de precios
   S.unsub.push(db.collection(COL.rec).onSnapshot(q=>{ S.recs=q.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(b.fecha||'').localeCompare(a.fecha||'')); refrescar(['detalle']); },errorFS));
+  // Reservas compartidas (la misma lista que StockApp y ProducciónApp)
+  S.unsub.push(db.collection(RES_COL).onSnapshot(q=>{
+    S.reservas=q.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>String(a.nombre||'').localeCompare(String(b.nombre||''),'es'));
+    if(!q.metadata.fromCache){ S.resListas=true; migrarReservas(); }
+    refrescar(['inicio','config','detalle']);
+  },errorFS));
   S.unsub.push(db.collection(COL.precios).onSnapshot(q=>{ S.precios={}; q.docs.forEach(d=>S.precios[d.id]=d.data()); },errorFS));
   S.unsub.push(db.collection(COL.oc).onSnapshot(q=>{
     S.ocs=q.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>b.id.localeCompare(a.id));
@@ -418,6 +426,22 @@ function iniciarDatos(){
   },errorFS));
   if(!S.vista || ['login','noauth'].includes(S.vista)) irA('inicio');
 }
+
+// Una sola vez: pasa los "Destinos y proyectos" viejos de ComprasApp a la lista compartida (mismo id, así las OC siguen vinculadas)
+let migrando=false;
+function migrarReservas(){
+  if(migrando||!S.resListas||!S.cfg||S.cfg.reservasMigradas) return;
+  const viejos=(S.cfg.destinos||[]).filter(d=>d&&d.id&&d.nombre&&d.tipo==='proyecto'&&!S.reservas.some(r=>r.id===d.id));
+  migrando=true; const b=db.batch();
+  viejos.forEach(d=>b.set(db.collection(RES_COL).doc(d.id),{nombre:d.nombre,tipo:'proyecto',cliente:'',codigo:d.codigo||'',archivado:!!d.archivado,
+    creado:Date.now(),actualizado:Date.now(),actualizadoPor:S.email,origen:'ComprasApp'},{merge:true}));
+  b.set(db.doc(COL.cfg+'/general'),{reservasMigradas:true},{merge:true});
+  b.commit().then(()=>{ if(viejos.length) toast(`${viejos.length} proyecto(s) pasados a Reservas`); }).catch(errorFS).finally(()=>{migrando=false;});
+}
+const reservaDe = id => S.reservas.find(r=>r.id===id);
+const nombreRes = r => r ? r.nombre+(r.codigo?' ('+r.codigo+')':'')+(r.cliente?' · '+r.cliente:'') : '';
+// Separa material solo una reserva de verdad (las OC viejas a "Stock" o "Taller" quedaron como libre uso)
+const separaMaterial = r => !!r && r.tipo!=='general';
 
 // =====================================================================
 // 4) NAVEGACIÓN
@@ -493,7 +517,7 @@ function elegirTile(id){ S.filtros.tile = S.filtros.tile===id ? '' : id; renderI
 function nFiltros(){ const F=S.filtros; return ['estado','destino','proveedor','moneda','razon','desde','hasta'].filter(k=>F[k]).length; }
 function ocsFiltradas(){
   const F=S.filtros, q=F.texto.trim().toLowerCase(), t=TILES.find(x=>x.id===F.tile);
-  const l=S.ocs.filter(o=>(!t||t.fn(o))&&(!F.estado||o.estado===F.estado)&&(!F.destino||o.destinoId===F.destino)&&(!F.proveedor||o.proveedorId===F.proveedor)
+  const l=S.ocs.filter(o=>(!t||t.fn(o))&&(!F.estado||o.estado===F.estado)&&(!F.destino||(F.destino==='-'?!separaMaterial(o.destinoSnap):o.destinoId===F.destino))&&(!F.proveedor||o.proveedorId===F.proveedor)
     &&(!F.moneda||o.moneda===F.moneda)&&(!F.razon||o.razonId===F.razon)&&(!F.desde||o.fechaEmision>=F.desde)&&(!F.hasta||o.fechaEmision<=F.hasta)
     &&(!q||(o.numero||'').toLowerCase().includes(q)||(o.textoBusqueda||'').includes(q)));
   // con un cuadro del semáforo elegido, ordena por fecha de necesidad
@@ -506,7 +530,7 @@ function panelFiltros(){
   const F=S.filtros, c=S.cfg;
   return `<div class="card"><div class="fila">
     <div><label>Estado</label><select onchange="setFiltro('estado',this.value)"><option value="">Todos</option>${ESTADOS.map(e=>`<option value="${e.id}" ${sel(F.estado,e.id)}>${e.nombre}</option>`).join('')}</select></div>
-    <div><label>Destino</label><select onchange="setFiltro('destino',this.value)"><option value="">Todos</option>${c.destinos.map(d=>`<option value="${d.id}" ${sel(F.destino,d.id)}>${esc(d.nombre)}${d.codigo?' ('+esc(d.codigo)+')':''}</option>`).join('')}</select></div>
+    <div><label>Reserva</label><select onchange="setFiltro('destino',this.value)"><option value="">Todas</option><option value="-" ${sel(F.destino,'-')}>Sin reserva (libre uso)</option>${S.reservas.map(d=>`<option value="${d.id}" ${sel(F.destino,d.id)}>${esc(nombreRes(d))}</option>`).join('')}</select></div>
     <div><label>Proveedor</label><select onchange="setFiltro('proveedor',this.value)"><option value="">Todos</option>${S.provs.map(p=>`<option value="${p.id}" ${sel(F.proveedor,p.id)}>${esc(p.razonSocial)}</option>`).join('')}</select></div>
     <div><label>Moneda</label><select onchange="setFiltro('moneda',this.value)"><option value="">Todas</option><option ${sel(F.moneda,'ARS')}>ARS</option><option ${sel(F.moneda,'USD')}>USD</option></select></div>
     <div><label>Razón social</label><select onchange="setFiltro('razon',this.value)"><option value="">Todas</option>${c.razones.map(r=>`<option value="${r.id}" ${sel(F.razon,r.id)}>${esc(r.nombre)}</option>`).join('')}</select></div>
@@ -538,7 +562,7 @@ function renderListaOC(){
 // =====================================================================
 // 7) FORMULARIO DE ORDEN DE COMPRA
 // =====================================================================
-function itemVacio(){ return {codigo:'',descripcion:'',cantidad:1,unidad:(S.cfg.unidades[0]||'u'),precioUnit:0,cantRecibida:0,stockId:'',area:''}; }
+function itemVacio(){ return {codigo:'',descripcion:'',cantidad:1,unidad:(S.cfg.unidades[0]||'u'),precioUnit:0,cantRecibida:0,stockId:'',area:'',reservaId:''}; }
 // Abre el formulario: vacío, con una OC existente (editar) o con una base (duplicar)
 function nuevaOC(base){
   if(!S.cfg) return;
@@ -546,7 +570,7 @@ function nuevaOC(base){
   S.form = base || {
     id:null, estado:'borrador', fechaEmision:hoy(), fechaNecesidad:'',
     proveedorId:'', proveedorSnap:null,
-    razonId:(c.razones[0]||{}).id||'', destinoId:(c.destinos.find(d=>!d.archivado)||{}).id||'',
+    razonId:(c.razones[0]||{}).id||'', destinoId:'',
     moneda:'ARS', tipoCambio:'', items:[itemVacio()], discriminarIva:true, ivaPct:21,
     condicionPago:'', lugarEntrega:'', observaciones:'', historial:[]
   };
@@ -561,15 +585,51 @@ function duplicarOC(id){
   const o=S.ocs.find(x=>x.id===id); if(!o) return;
   nuevaOC({ id:null, estado:'borrador', fechaEmision:hoy(), fechaNecesidad:'',
     proveedorId:o.proveedorId, proveedorSnap:o.proveedorSnap, razonId:o.razonId, destinoId:o.destinoId,
-    moneda:o.moneda, tipoCambio:o.tipoCambio??'', items:(o.items||[]).map(i=>({codigo:i.codigo,descripcion:i.descripcion,cantidad:i.cantidad,unidad:i.unidad,precioUnit:i.precioUnit,cantRecibida:0,stockId:i.stockId||'',area:i.area||''})),
+    moneda:o.moneda, tipoCambio:o.tipoCambio??'', items:(o.items||[]).map(i=>({codigo:i.codigo,descripcion:i.descripcion,cantidad:i.cantidad,unidad:i.unidad,precioUnit:i.precioUnit,cantRecibida:0,stockId:i.stockId||'',area:i.area||'',reservaId:i.reservaId||'',reservaSnap:i.reservaSnap||null})), resPorItem:!!o.resPorItem,
     discriminarIva:o.discriminarIva, ivaPct:o.ivaPct, condicionPago:o.condicionPago, lugarEntrega:o.lugarEntrega, observaciones:o.observaciones, historial:[] });
   toast('Copia creada: revisala y guardala para asignarle número');
 }
-function opcionesDestino(actual){
-  const ds=S.cfg.destinos.filter(d=>!d.archivado||d.id===actual);
-  const gen=ds.filter(d=>d.tipo!=='proyecto'), pro=ds.filter(d=>d.tipo==='proyecto');
-  const op=d=>`<option value="${d.id}" ${sel(actual,d.id)}>${esc(d.nombre)}${d.codigo?' ('+esc(d.codigo)+')':''}</option>`;
-  return `<option value="">— Elegir —</option>${gen.map(op).join('')}${pro.length?`<optgroup label="Proyectos">${pro.map(op).join('')}</optgroup>`:''}`;
+// modo: 'oc' (campo de la OC), 'item' (con "Igual que la OC") o 'rec' (recepción). Valores: '' / '-' = libre uso, id = reserva
+function opcionesDestino(actual,modo='oc',snap){
+  const ds=S.reservas.filter(d=>!d.archivado||d.id===actual);
+  const op=d=>`<option value="${d.id}" ${sel(actual,d.id)}>${esc(nombreRes(d))}</option>`;
+  const grupo=(t,tit)=>{ const l=ds.filter(d=>tipoRes(d)===t); return l.length?`<optgroup label="${tit}">${l.map(op).join('')}</optgroup>`:''; };
+  // reserva borrada de la lista pero guardada en la OC: se sigue mostrando
+  const vieja=actual&&actual!=='-'&&!ds.some(d=>d.id===actual)&&snap?`<option value="${esc(actual)}" selected>${esc(snap.nombre)}</option>`:'';
+  const nueva=modo==='rec'?'':`<option value="__nueva">＋ Nueva reserva…</option>`;
+  if(modo==='item'){ const g=reservaDe(S.form.destinoId);
+    return `<option value="" ${sel(actual,'')}>Igual que la OC (${esc(g?g.nombre:'libre uso')})</option><option value="-" ${sel(actual,'-')}>${LIBRE}</option>${vieja}${grupo('proyecto','Proyectos')}${grupo('repuesto','Repuestos')}${nueva}`; }
+  const libre=modo==='rec'?'-':'';
+  return `<option value="${libre}" ${!actual||actual==='-'?'selected':''}>${LIBRE}</option>${vieja}${grupo('proyecto','Proyectos')}${grupo('repuesto','Repuestos')}${nueva}`;
+}
+// Elegir reserva en la OC (i = null) o en un ítem (i = n° de ítem); "＋ Nueva reserva…" abre la carga rápida
+function elegirReserva(sel_,i){
+  const v=sel_.value;
+  if(v==='__nueva'){ sel_.value=i==null?(S.form.destinoId||''):(S.form.items[i].reservaId||''); return modalNuevaReserva(i); }
+  if(i==null){ S.form.destinoId=v; if(S.form.resPorItem) renderItems(); } else S.form.items[i].reservaId=v;
+}
+function setResPorItem(v){ S.form.resPorItem=v; if(!v) S.form.items.forEach(it=>it.reservaId=''); renderItems(); }
+// Carga rápida de una reserva desde la OC
+function modalNuevaReserva(i){
+  abrirModal(`<h3>Nueva reserva</h3>
+    <label for="nr-nombre">Nombre</label><input id="nr-nombre" placeholder="Ej.: Clasificador de pollo B">
+    <div class="fila"><div><label for="nr-tipo">Tipo</label><select id="nr-tipo">${Object.entries(TIPOS_RES).map(([k,n])=>`<option value="${k}">${n}</option>`).join('')}</select></div>
+      <div><label for="nr-cliente">Cliente</label><input id="nr-cliente"></div></div>
+    <label for="nr-codigo">Código (opcional)</label><input id="nr-codigo" placeholder="Ej.: OV 1234">
+    <p class="muted">Se agrega a la lista de Reservas (la misma de StockApp y ProducciónApp) y queda elegida ${i==null?'en esta OC':'en el ítem '+(i+1)}.</p>
+    <div class="acciones"><button class="btn" onclick="cerrarModal()">Cancelar</button><button class="btn pri" onclick="crearReservaRapida(${i==null?'null':i})">Crear reserva</button></div>`);
+  setTimeout(()=>$('nr-nombre')&&$('nr-nombre').focus(),100);
+}
+async function crearReservaRapida(i){
+  const nombre=$('nr-nombre').value.trim(); if(!nombre) return toast('Escribí el nombre de la reserva');
+  if(nombreRepetido(nombre)) return toast('Ya hay una reserva con ese nombre: elegila de la lista');
+  const id='d'+Date.now().toString(36), d={nombre,tipo:$('nr-tipo').value,cliente:$('nr-cliente').value.trim(),codigo:$('nr-codigo').value.trim(),archivado:false,
+    creado:Date.now(),actualizado:Date.now(),actualizadoPor:S.email,origen:'ComprasApp'};
+  if(!S.reservas.some(r=>r.id===id)) S.reservas.push({id,...d});   // aparece ya, aunque no haya internet
+  cerrarModal();
+  if(i==null) S.form.destinoId=id; else S.form.items[i].reservaId=id;
+  renderForm();
+  escribir(db.collection(RES_COL).doc(id).set(d),'Reserva "'+nombre+'" creada');
 }
 function renderForm(){
   const f=S.form, c=S.cfg;
@@ -590,7 +650,7 @@ function renderForm(){
     ${razones.length?`<select onchange="setF('razonId',this.value)">${razones.map(r=>`<option value="${r.id}" ${sel(f.razonId,r.id)}>${esc(r.nombre)} — CUIT ${esc(r.cuit)}</option>`).join('')}</select>`
       :`<div class="muted">Primero cargá tus razones sociales en <a href="#" onclick="irA('config');return false">Configuración</a>.</div>`}
     <div class="fila">
-      <div><label>Destino interno</label><select onchange="setF('destinoId',this.value)">${opcionesDestino(f.destinoId)}</select></div>
+      <div><label>Reserva</label><select onchange="elegirReserva(this,null)">${opcionesDestino(f.destinoId,'oc',f.destinoSnap)}</select></div>
       <div><label>Moneda</label><select onchange="setF('moneda',this.value)"><option ${sel(f.moneda,'ARS')}>ARS</option><option ${sel(f.moneda,'USD')}>USD</option></select></div>
       ${f.moneda==='USD'?`<div><label>Tipo de cambio ref. (opcional)</label><input type="number" inputmode="decimal" step="any" value="${f.tipoCambio??''}" placeholder="ARS por USD" oninput="setF('tipoCambio',this.value)"></div>`:''}
     </div>
@@ -598,7 +658,9 @@ function renderForm(){
       <input type="number" id="f-tcmet" inputmode="decimal" step="any" value="${f.tcMetricas??''}" placeholder="ARS por USD" oninput="setF('tcMetricas',this.value)">
       <div class="pista" id="f-tcmet-pista"></div></div>`:''}
   </div>
-  <div class="card"><h3>Ítems</h3><div id="items"></div>
+  <div class="card"><h3>Ítems</h3>
+    <label class="chk" style="margin-top:0"><input type="checkbox" ${f.resPorItem?'checked':''} onchange="setResPorItem(this.checked)"><span>Separar la reserva por ítem</span></label>
+    <div id="items"></div>
     <div class="acciones" style="margin-top:0"><button class="btn" onclick="agregarItem()">＋ Agregar ítem</button><button class="btn" onclick="modalPegar()">Pegar desde planilla</button></div></div>
   <div class="card">
     <label style="color:var(--text);font-size:15px"><input type="checkbox" ${f.discriminarIva?'checked':''} onchange="setF('discriminarIva',this.checked)">Discriminar IVA</label>
@@ -635,6 +697,7 @@ function renderItems(){
       <div><label>Cantidad</label><input type="number" inputmode="decimal" step="any" value="${it.cantidad}" oninput="setItem(${i},'cantidad',this.value)"></div>
       <div><label>Precio unitario</label><input type="number" inputmode="decimal" step="any" value="${it.precioUnit}" oninput="setItem(${i},'precioUnit',this.value)"></div>
     </div>
+    ${f.resPorItem?`<label>Reserva de este ítem</label><select onchange="elegirReserva(this,${i})">${opcionesDestino(it.reservaId||'','item',it.reservaSnap)}</select>`:''}
     <div class="pista" id="it-hint-${i}">${pistaPrecio(i)}</div>
     <div class="muted" style="text-align:right;margin-top:6px">Total ítem: <b id="it-tot-${i}">${fmtMon(num(it.cantidad)*num(it.precioUnit),f.moneda)}</b></div>
   </div>`; }).join('');
@@ -735,7 +798,6 @@ function renderTotales(){
 function validarOC(f){
   if(!f.proveedorId) return 'Elegí un proveedor';
   if(!f.razonId) return 'Elegí la razón social a facturar';
-  if(!f.destinoId) return 'Elegí el destino interno';
   const its=(f.items||[]).filter(i=>String(i.descripcion||'').trim());
   if(!its.length) return 'Cargá al menos un ítem con descripción';
   if(its.some(i=>num(i.cantidad)<=0)) return 'Hay ítems con cantidad 0';
@@ -746,11 +808,12 @@ function armarDatosOC(f){
   const t=calcTotales(f);
   const prov=S.provs.find(p=>p.id===f.proveedorId)||f.proveedorSnap||null;
   const r=S.cfg.razones.find(x=>x.id===f.razonId)||null;
-  const d=S.cfg.destinos.find(x=>x.id===f.destinoId)||f.destinoSnap||null;
+  const d=reservaDe(f.destinoId)||f.destinoSnap||null;
   const items=(f.items||[]).filter(it=>String(it.descripcion||'').trim()||num(it.precioUnit)).map((it,i)=>({
     n:i+1, codigo:String(it.codigo||'').trim(), descripcion:String(it.descripcion||'').trim(),
     cantidad:num(it.cantidad), unidad:it.unidad||'', precioUnit:num(it.precioUnit),
-    total:redondear(num(it.cantidad)*num(it.precioUnit)), cantRecibida:num(it.cantRecibida), stockId:it.stockId||'', area:it.area||''
+    total:redondear(num(it.cantidad)*num(it.precioUnit)), cantRecibida:num(it.cantRecibida), stockId:it.stockId||'', area:it.area||'',
+    reservaId:f.resPorItem?(it.reservaId||''):'', reservaSnap:f.resPorItem&&it.reservaId&&it.reservaId!=='-'?snapRes(reservaDe(it.reservaId)||it.reservaSnap):null
   }));
   return {
     estado:f.estado, fechaEmision:f.fechaEmision, fechaNecesidad:f.fechaNecesidad||'',
@@ -758,7 +821,8 @@ function armarDatosOC(f){
     proveedorSnap:prov?{razonSocial:prov.razonSocial||'',cuit:prov.cuit||'',contacto:prov.contacto||'',telefono:prov.telefono||'',mail:prov.mail||''}:null,
     razonId:f.razonId||'',
     razonSnap:r?{nombre:r.nombre||'',cuit:r.cuit||'',domicilio:r.domicilio||'',telefono:r.telefono||'',mail:r.mail||'',iva:r.iva||''}:null,
-    destinoId:f.destinoId||'', destinoSnap:d?{nombre:d.nombre,codigo:d.codigo||'',tipo:d.tipo||'general'}:null,
+    resPorItem:!!f.resPorItem,
+    destinoId:f.destinoId||'', destinoSnap:f.destinoId&&d?{nombre:d.nombre,codigo:d.codigo||'',cliente:d.cliente||'',tipo:d.tipo||'proyecto'}:null,
     moneda:f.moneda, tipoCambio:(f.tipoCambio===''||f.tipoCambio==null)?null:num(f.tipoCambio),
     tcMetricas:f.moneda==='ARS'&&num(f.tcMetricas)>0?num(f.tcMetricas):null,
     items, discriminarIva:!!f.discriminarIva, ivaPct:num(f.ivaPct), ...t,
@@ -828,12 +892,12 @@ function renderDetalle(){
     <div style="margin-top:10px"><div class="muted">Proveedor</div><b>${esc(p.razonSocial||'—')}</b>${p.cuit?' · CUIT '+esc(p.cuit):''}<br>
       ${p.telefono?`<a href="https://wa.me/${String(p.telefono).replace(/\D/g,'')}" target="_blank">${esc(p.telefono)}</a> `:''}${p.mail?` <a href="mailto:${esc(p.mail)}">${esc(p.mail)}</a>`:''}</div>
     <div style="margin-top:10px"><div class="muted">Facturar a</div>${esc(r.nombre||'—')}${r.cuit?' · CUIT '+esc(r.cuit):''}</div>
-    <div style="margin-top:10px"><div class="muted">Destino</div>${esc(d.nombre||'—')}${d.codigo?' ('+esc(d.codigo)+')':''}</div>
+    <div style="margin-top:10px"><div class="muted">Reserva</div>${separaMaterial(o.destinoSnap)?esc(d.nombre)+(d.cliente?' · '+esc(d.cliente):''):esc(d.nombre?d.nombre+' (libre uso)':'Sin reserva (libre uso)')}${d.codigo?' ('+esc(d.codigo)+')':''}</div>
     ${o.tipoCambio&&o.moneda==='USD'?`<div style="margin-top:10px"><div class="muted">Tipo de cambio de referencia</div>$ ${fmtNum(o.tipoCambio)} por USD</div>`:''}
   </div>
   <div class="card"><h3>Ítems</h3>
     <table class="tabla-items"><tr><th>#</th><th>Descripción</th><th class="der">Cant.</th><th class="der">Total</th></tr>
-    ${(o.items||[]).map(it=>`<tr><td>${it.n}</td><td>${esc(it.descripcion)}${it.codigo?`<div class="muted">Cód. ${esc(it.codigo)}${it.stockId?' · StockApp':''}</div>`:''}<div class="muted">${fmtMon(it.precioUnit,m)} / ${esc(it.unidad)}</div>${num(it.cantRecibida)>0?`<div class="${num(it.cantRecibida)>=num(it.cantidad)?'txt-verde':'txt-amarillo'}" style="font-size:14px">Recibido ${fmtCant(it.cantRecibida)} de ${fmtCant(it.cantidad)}</div>`:''}</td><td class="der">${fmtCant(it.cantidad)} ${esc(it.unidad)}</td><td class="der">${fmtMon(it.total,m)}</td></tr>`).join('')}
+    ${(o.items||[]).map(it=>`<tr><td>${it.n}</td><td>${esc(it.descripcion)}${it.codigo?`<div class="muted">Cód. ${esc(it.codigo)}${it.stockId?' · StockApp':''}</div>`:''}<div class="muted">${fmtMon(it.precioUnit,m)} / ${esc(it.unidad)}</div>${o.resPorItem?`<div class="muted">Reserva: ${esc((resItem(o,it)||{}).nombre||'libre uso')}</div>`:''}${num(it.cantRecibida)>0?`<div class="${num(it.cantRecibida)>=num(it.cantidad)?'txt-verde':'txt-amarillo'}" style="font-size:14px">Recibido ${fmtCant(it.cantRecibida)} de ${fmtCant(it.cantidad)}</div>`:''}</td><td class="der">${fmtCant(it.cantidad)} ${esc(it.unidad)}</td><td class="der">${fmtMon(it.total,m)}</td></tr>`).join('')}
     </table>
     <div class="totales" style="margin-top:10px">${o.discriminarIva
       ?`<div><span>Subtotal neto</span><span>${fmtMon(o.subtotal,m)}</span></div><div><span>IVA ${String(o.ivaPct).replace('.',',')} %</span><span>${fmtMon(o.iva,m)}</span></div>`:''}
@@ -1038,9 +1102,18 @@ async function crearItemStock(base){
 function recepcionesDe(o){
   const l=S.recs.filter(r=>r.ocId===o.id); if(!l.length) return '';
   return `<div class="card" style="margin-top:12px"><h3>Recepciones</h3>${l.map(r=>`<div class="item">
-    <div class="lin"><b>${fmtFecha(r.fecha)} · ${r.remito?'Remito '+esc(r.remito):'Sin remito'}</b>${r.alStock&&(r.movimientos||[]).length?'<span class="badge recibida">Ingresado a StockApp</span>':''}</div>
-    <div class="muted">${(r.items||[]).map(x=>`${fmtCant(x.cantidad)} ${esc(x.unidad)} · ${esc(x.descripcion)}`).join('<br>')}</div>
+    <div class="lin"><b>${fmtFecha(r.fecha)} · ${r.remito?'Remito '+esc(r.remito):'Sin remito'}</b>${r.alStock&&(r.movimientos||[]).length?'<span class="badge recibida">Ingresado a StockApp</span>':''}${r.reservaId?'<span class="badge parcial">Reservado</span>':''}</div>
+    <div class="muted">${(r.items||[]).map(x=>`${fmtCant(x.cantidad)} ${esc(x.unidad)} · ${esc(x.descripcion)}${x.reserva?` · <span class="txt-amarillo">reservado: ${esc(x.reserva)}</span>`:''}`).join('<br>')}</div>
     ${r.obs?`<div class="muted">${esc(r.obs)}</div>`:''}<div class="muted">${esc(r.usuario||'')}</div></div>`).join('')}</div>`;
+}
+// Reserva de la OC (la de la lista; si se borró, la copia guardada en la OC)
+function resOC(o){ return reservaDe(o.destinoId) || (o.destinoSnap&&o.destinoId?{id:o.destinoId,...o.destinoSnap}:null); }
+const snapRes = r => r ? {nombre:r.nombre,codigo:r.codigo||'',cliente:r.cliente||'',tipo:r.tipo||'proyecto'} : null;
+// Reserva que corresponde a un ítem: la propia si la OC separa por ítem; si no, la de la OC. null = libre uso
+function resItem(o,it){
+  if(o.resPorItem && it.reservaId==='-') return null;
+  if(o.resPorItem && it.reservaId) return reservaDe(it.reservaId) || (it.reservaSnap?{id:it.reservaId,...it.reservaSnap}:null);
+  const r=resOC(o); return separaMaterial(r)?r:null;
 }
 function modalRecepcion(id){
   const o=S.ocs.find(x=>x.id===id), its=o.items||[], hayStock=its.some(i=>i.stockId);
@@ -1050,9 +1123,11 @@ function modalRecepcion(id){
       return `<div class="item"><div class="item-h"><span>Ítem ${it.n}</span>${it.stockId?`<span class="badge emitida">${esc(it.codigo)}</span>`:''}</div>
         <div>${esc(it.descripcion)}</div>
         <div class="muted">Pedido ${fmtCant(it.cantidad)} ${esc(it.unidad)} · Recibido ${fmtCant(it.cantRecibida)} · Pendiente ${fmtCant(pend)}</div>
-        <label for="r-c${k}">Recibido ahora (${esc(it.unidad)})</label><input type="number" inputmode="decimal" step="any" min="0" id="r-c${k}" value="${pend}"></div>`; }).join('')}
+        <label for="r-c${k}">Recibido ahora (${esc(it.unidad)})</label><input type="number" inputmode="decimal" step="any" min="0" id="r-c${k}" value="${pend}">
+        ${it.stockId?(()=>{ const r=resItem(o,it); return `<label for="r-rs${k}">Reservar lo recibido para</label><select id="r-rs${k}">${opcionesDestino(r?r.id:'-','rec',r)}</select>`; })():''}</div>`; }).join('')}
     ${hayStock?`<label class="chk"><input type="checkbox" id="r-stock" checked>Ingresar al stock de StockApp los ítems con código</label>
-      <label class="chk"><input type="checkbox" id="r-costo" checked>Actualizar el costo en StockApp con el precio de esta OC</label>`:''}
+      <label class="chk"><input type="checkbox" id="r-costo" checked>Actualizar el costo en StockApp con el precio de esta OC</label>
+      <div class="pista">Podés repartir un ítem entre reservas recibiéndolo en partes: cada recepción con su reserva.</div>`:''}
     <label for="r-obs">Observaciones (opcional)</label><input id="r-obs">
     <div class="acciones"><button class="btn" onclick="cerrarModal()">Cancelar</button><button class="btn pri" onclick="guardarRecepcion('${id}')">Guardar recepción</button></div>`);
 }
@@ -1063,7 +1138,16 @@ async function guardarRecepcion(id){
   if(cant.some(c=>c<0)) return toast('Las cantidades no pueden ser negativas');
   if(!cant.some(c=>c>0)) return toast('Cargá al menos una cantidad recibida');
   const alStock=!!($('r-stock')&&$('r-stock').checked), conCosto=!!($('r-costo')&&$('r-costo').checked);
-  const items=o.items.map((it,k)=>({...it,cantRecibida:r3(num(it.cantRecibida)+cant[k])}));
+  // reserva elegida en la recepción para cada ítem (puede cambiar la de la OC)
+  const resK=(o.items||[]).map((it,k)=>{ const el=$('r-rs'+k); if(!el) return undefined; const v=el.value; if(!v||v==='-') return null; const r0=resItem(o,it);
+    return reservaDe(v)||(r0&&r0.id===v?r0:null); });
+  const cambioRes=(o.items||[]).some((it,k)=>resK[k]!==undefined && cant[k]>0 && ((resK[k]&&resK[k].id)||null)!==((resItem(o,it)||{}).id||null));
+  const nombresRes=new Set(); let nRes=0;
+  const items=o.items.map((it,k)=>{ const x={...it,cantRecibida:r3(num(it.cantRecibida)+cant[k])};
+    // si en la recepción se cambió la reserva, la OC pasa a separar por ítem y la recuerda para la próxima recepción
+    if(cambioRes&&resK[k]!==undefined){ x.reservaId=resK[k]?resK[k].id:'-'; x.reservaSnap=resK[k]?snapRes(resK[k]):null; }
+    else if(cambioRes&&!o.resPorItem){ const r=resItem(o,it); x.reservaId=r?r.id:'-'; x.reservaSnap=r?snapRes(r):null; }
+    return x; });
   const completa=items.every(it=>it.cantRecibida>=num(it.cantidad)-1e-9);
   const nuevo=['emitida','parcial'].includes(o.estado)?(completa?'recibida':'parcial'):o.estado;
   const b=db.batch(), recRef=db.collection(COL.rec).doc(), movs=[], refTxt=o.numero+(remito?' · Remito '+remito:'');
@@ -1076,14 +1160,19 @@ async function guardarRecepcion(id){
     const patch={stock:firebase.firestore.FieldValue.increment(cant[k]),actualizado:Date.now()};
     if(items[k].cantRecibida>=num(it.cantidad)-1e-9) patch.pedidoCurso=null;      // ítem completo: ya no está "en curso"
     if(conCosto&&num(it.precioUnit)>0){ patch.costo=costoNeto(it.precioUnit,o); patch.moneda=o.moneda; }
+    // Misma reserva que se hace desde StockApp (ficha del material → Reservar), con la OC de origen
+    const res=resK[k];
+    if(res){ patch.reservas=[...(si.reservas||[]),{id:'r'+Date.now().toString(36)+k,destino:res.nombre,reservaId:res.id,cantidad:cant[k],fecha:Date.now(),usuario:S.nombre,origen:'ComprasApp',oc:o.numero}]; nRes++; nombresRes.add(res.nombre); }
     b.set(db.collection(SCOL.items).doc(si.id),patch,{merge:true});
   });
-  b.set(recRef,{ocId:o.id,numero:o.numero,fecha,remito,obs,alStock,movimientos:movs,usuario:S.email,creado:ts(),
-    items:o.items.map((it,k)=>({n:it.n,codigo:it.codigo||'',stockId:it.stockId||'',descripcion:it.descripcion,unidad:it.unidad,cantidad:cant[k]})).filter(x=>x.cantidad>0)});
-  b.update(db.collection(COL.oc).doc(o.id),{items,estado:nuevo,actualizado:ts(),actualizadoPor:S.email,
-    historial:firebase.firestore.FieldValue.arrayUnion(entradaHist(nuevo,(remito?'Remito '+remito:'Recepción sin remito')+(movs.length?' · ingresado a StockApp':'')))});
+  b.set(recRef,{ocId:o.id,numero:o.numero,fecha,remito,obs,alStock,movimientos:movs,reservaId:nRes?'si':'',usuario:S.email,creado:ts(),
+    items:o.items.map((it,k)=>({n:it.n,codigo:it.codigo||'',stockId:it.stockId||'',descripcion:it.descripcion,unidad:it.unidad,cantidad:cant[k],
+      reserva:alStock&&resK[k]?resK[k].nombre:''})).filter(x=>x.cantidad>0)});
+  const txtRes=nRes?' · reservado para '+[...nombresRes].join(', '):'';
+  b.update(db.collection(COL.oc).doc(o.id),{items,estado:nuevo,...(cambioRes?{resPorItem:true}:{}),actualizado:ts(),actualizadoPor:S.email,
+    historial:firebase.firestore.FieldValue.arrayUnion(entradaHist(nuevo,(remito?'Remito '+remito:'Recepción sin remito')+(movs.length?' · ingresado a StockApp':'')+txtRes))});
   cerrarModal();
-  await escribir(b.commit(),'Recepción registrada'+(movs.length?` · ${movs.length} ingreso(s) en StockApp`:''));
+  await escribir(b.commit(),'Recepción registrada'+(movs.length?` · ${movs.length} ingreso(s) en StockApp`:'')+txtRes);
 }
 
 // =====================================================================
@@ -1211,7 +1300,7 @@ function renderMetricas(){
       ${g.s?`<span class="tile-sub">${g.s}</span>`:''}</div>`).join('')}
       <div class="tile" style="cursor:default"><span class="tile-lbl">Total en dólares</span><span class="tile-num" style="font-size:28px">US$ ${fmtCorto(totUSD)}</span>
       <span class="tile-sub">Emitidas, con pesos pasados a dólares${estim?` · ${estim} con dólar estimado`:''}${sinTC?` · ${sinTC} sin dólar`:''}</span></div></div>
-    <div class="card"><h3>Por destino o proyecto</h3>${barrasH(agrupar(emit,o=>o.destinoSnap?(o.destinoSnap.nombre+(o.destinoSnap.codigo?' ('+o.destinoSnap.codigo+')':'')):''))}</div>
+    <div class="card"><h3>Por reserva</h3>${barrasH(agrupar(emit,o=>separaMaterial(o.destinoSnap)?(o.destinoSnap.nombre+(o.destinoSnap.codigo?' ('+o.destinoSnap.codigo+')':'')):'Libre uso (sin reserva)'))}</div>
     <div class="card"><h3>Por proveedor</h3>${barrasH(agrupar(emit,o=>(o.proveedorSnap||{}).razonSocial))}</div>
     <div class="card"><h3>Por mes · últimos 12 meses</h3>
       <div class="meses">${meses.map((m,k)=>`<div class="mes ${k===11?'actual':''}" title="${m.m}: US$ ${fmtNum(m.v,0)}"><span class="v">${m.v?fmtCorto(m.v):''}</span><span class="col" style="height:${m.v?Math.max(2,m.v/maxM*110):1}px"></span><span class="m">${m.m}</span></div>`).join('')}</div>
@@ -1416,6 +1505,8 @@ function elegirProveedor(id,datos){
 function guardarCfg(parcial,msg){ return escribir(db.doc(COL.cfg+'/general').set(parcial,{merge:true}),msg||'Configuración guardada'); }
 function renderConfig(){
   if(!S.cfg) return;
+  // conserva abiertas las secciones que estaban abiertas
+  const abiertas=[...document.querySelectorAll('#v-config details')].map(d=>d.open);
   const c=S.cfg;
   const razonForm=i=>{ const r=c.razones[i]||{}; const logo=S.logoTmp[i]!==undefined?S.logoTmp[i]:(r.logo?{data:r.logo}:null);
     const cp=(k,t,ex='')=>`<label>${t}</label><input id="r${i}-${k}" value="${esc(r[k]||'')}" ${ex}>`;
@@ -1439,12 +1530,16 @@ function renderConfig(){
       <span><input type="checkbox" id="u-${esc(u.email)}" ${u.compras?'checked':''} ${S.esAdmin?'':'disabled'} onchange="permisoCompras('${esc(u.email)}',this.checked)">Compras</span></label>`).join('')
       :'<div class="muted">Todavía no hay usuarios cargados en StockApp.</div>'}
   </details>
-  <details class="card"><summary>Destinos y proyectos</summary>
-    ${c.destinos.map(d=>`<div class="item" style="display:flex;justify-content:space-between;align-items:center;gap:8px;${d.archivado?'opacity:.55':''}">
-      <div><b>${esc(d.nombre)}</b>${d.codigo?' · '+esc(d.codigo):''}<div class="muted">${d.tipo==='proyecto'?'Proyecto':'General'}${d.archivado?' · Archivado':''}</div></div>
-      <div style="display:flex;gap:6px"><button class="btn chico" onclick="archivarDestino('${d.id}')">${d.archivado?'Reactivar':'Archivar'}</button><button class="btn chico peligro" onclick="borrarDestino('${d.id}')">✕</button></div></div>`).join('')}
-    <div class="fila"><div><label>Nombre</label><input id="d-nombre"></div><div><label>Tipo</label><select id="d-tipo"><option value="proyecto">Proyecto</option><option value="general">General</option></select></div><div><label>Código (proyectos)</label><input id="d-codigo"></div></div>
-    <div class="acciones"><button class="btn pri" onclick="agregarDestino()">＋ Agregar destino</button></div>
+  <details class="card"><summary>Reservas</summary>
+    <p class="muted">Es la misma lista en StockApp, ComprasApp y ProducciónApp: lo que cambies acá se ve en las tres. Lo reservado se separa en StockApp; lo que no tiene reserva es stock de libre uso.</p>
+    ${S.resListas||S.reservas.length?'':'<div class="muted">Cargando reservas…</div>'}
+    ${S.resListas&&!S.reservas.length?'<div class="muted">Todavía no hay reservas.</div>':''}${['proyecto','repuesto'].map(t=>{ const l=S.reservas.filter(d=>tipoRes(d)===t); return l.length?`<div class="muted" style="margin:12px 0 6px;font-weight:600">${{proyecto:'Proyectos',repuesto:'Repuestos'}[t]}</div>`+l.map(filaReserva).join(''):''; }).join('')}
+    <div class="item" style="margin-top:12px"><div class="item-h">Nueva reserva</div>
+      <div class="fila"><div><label for="d-nombre">Nombre</label><input id="d-nombre" placeholder="Ej.: Clasificador de pollo B"></div>
+        <div><label for="d-tipo">Tipo</label><select id="d-tipo">${Object.entries(TIPOS_RES).map(([k,n])=>`<option value="${k}">${n}</option>`).join('')}</select></div>
+        <div><label for="d-cliente">Cliente</label><input id="d-cliente" placeholder="Ej.: Granja Tres Arroyos"></div>
+        <div><label for="d-codigo">Código (opcional)</label><input id="d-codigo" placeholder="Ej.: OV 1234"></div></div>
+      <div class="acciones"><button class="btn pri" onclick="agregarReserva()">＋ Agregar reserva</button></div></div>
   </details>
   <details class="card"><summary>Semáforo</summary>
     <p class="muted">Verde: faltan más días que "amarillo". Amarillo: entre "rojo" y "amarillo". Rojo: igual o menos que "rojo", o vencida.</p>
@@ -1475,6 +1570,7 @@ function renderConfig(){
     </div>
   </details>
   <div class="card"><div class="muted">Sesión: ${esc(S.email)}</div><div class="acciones"><button class="btn" onclick="salir()">Cerrar sesión</button></div></div>`;
+  if(abiertas.length) document.querySelectorAll('#v-config details').forEach((d,i)=>{ if(i<abiertas.length) d.open=abiertas[i]; });
 }
 // --- Razones sociales ---
 function comprimirImagen(file,max=400){
@@ -1513,16 +1609,45 @@ async function permisoCompras(email,valor){
   await escribir(db.collection(SCOL.usuarios).doc(email).set({compras:!!valor},{merge:true}),valor?'Permiso Compras activado':'Permiso Compras quitado');
 }
 // --- Destinos / proyectos ---
-async function agregarDestino(){
-  const nombre=$('d-nombre').value.trim(); if(!nombre) return toast('Escribí el nombre del destino');
-  const d={id:'d'+Date.now().toString(36), nombre, tipo:$('d-tipo').value, codigo:$('d-codigo').value.trim(), archivado:false};
-  await guardarCfg({destinos:[...S.cfg.destinos,d]},'Destino agregado');
+// Materiales de StockApp con algo reservado para esta reserva
+function materialesReservados(r){ return S.stock.items.filter(it=>(it.reservas||[]).some(x=>x.reservaId===r.id||(!x.reservaId&&x.destino===r.nombre))); }
+function filaReserva(d){
+  const nOC=S.ocs.filter(o=>o.destinoId===d.id).length, nMat=materialesReservados(d).length;
+  return `<div class="item" style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px;${d.archivado?'opacity:.55':''}">
+    <div style="min-width:0;flex:1 1 180px"><b>${esc(d.nombre)}</b>${d.codigo?' · '+esc(d.codigo):''}<div class="muted">${[d.cliente?'Cliente: '+esc(d.cliente):'', nOC?nOC+' OC':'', nMat?nMat+' material'+(nMat===1?'':'es')+' reservado'+(nMat===1?'':'s'):'', d.archivado?'Archivada':''].filter(Boolean).join(' · ')||'Sin uso todavía'}</div></div>
+    <div style="display:flex;gap:6px;flex:0 0 auto;margin-left:auto"><button class="btn chico" onclick="modalReserva('${d.id}')">Editar</button><button class="btn chico" onclick="archivarReserva('${d.id}')">${d.archivado?'Reactivar':'Archivar'}</button><button class="btn chico peligro" onclick="borrarReserva('${d.id}')" aria-label="Borrar">✕</button></div></div>`;
 }
-async function archivarDestino(id){ await guardarCfg({destinos:S.cfg.destinos.map(d=>d.id===id?{...d,archivado:!d.archivado}:d)}); }
-async function borrarDestino(id){
-  const usadas=S.ocs.filter(o=>o.destinoId===id).length;
-  if(!confirm(`¿Borrar este destino?${usadas?` Está usado en ${usadas} OC: conviene archivarlo en lugar de borrarlo.`:''}`)) return;
-  await guardarCfg({destinos:S.cfg.destinos.filter(d=>d.id!==id)},'Destino borrado');
+const nombreRepetido=(nombre,id)=>S.reservas.some(r=>r.id!==id&&normTxt(r.nombre)===normTxt(nombre));
+async function agregarReserva(){
+  const nombre=$('d-nombre').value.trim(); if(!nombre) return toast('Escribí el nombre de la reserva');
+  if(nombreRepetido(nombre)) return toast('Ya hay una reserva con ese nombre');
+  if(document.activeElement) document.activeElement.blur();   // así la lista se actualiza y el formulario queda vacío
+  await escribir(db.collection(RES_COL).doc('d'+Date.now().toString(36)).set({nombre,tipo:$('d-tipo').value,cliente:$('d-cliente').value.trim(),codigo:$('d-codigo').value.trim(),archivado:false,
+    creado:Date.now(),actualizado:Date.now(),actualizadoPor:S.email,origen:'ComprasApp'}),'Reserva agregada');
+}
+function modalReserva(id){
+  const d=reservaDe(id); if(!d) return;
+  abrirModal(`<h3>Editar reserva</h3>
+    <label for="er-nombre">Nombre</label><input id="er-nombre" value="${esc(d.nombre)}">
+    <div class="fila"><div><label for="er-tipo">Tipo</label><select id="er-tipo">${Object.entries(TIPOS_RES).map(([k,n])=>`<option value="${k}" ${sel(tipoRes(d),k)}>${n}</option>`).join('')}</select></div>
+      <div><label for="er-cliente">Cliente</label><input id="er-cliente" value="${esc(d.cliente||'')}"></div>
+      <div><label for="er-codigo">Código</label><input id="er-codigo" value="${esc(d.codigo||'')}"></div></div>
+    <p class="muted">Si cambiás el nombre, las reservas de StockApp lo muestran actualizado. Las OC ya emitidas conservan el nombre con el que se hicieron.</p>
+    <div class="acciones"><button class="btn" onclick="cerrarModal()">Cancelar</button><button class="btn pri" onclick="guardarReserva('${id}')">Guardar</button></div>`);
+}
+async function guardarReserva(id){
+  const nombre=$('er-nombre').value.trim(); if(!nombre) return toast('Escribí el nombre');
+  if(nombreRepetido(nombre,id)) return toast('Ya hay una reserva con ese nombre');
+  cerrarModal();
+  await escribir(db.collection(RES_COL).doc(id).set({nombre,tipo:$('er-tipo').value,cliente:$('er-cliente').value.trim(),codigo:$('er-codigo').value.trim(),actualizado:Date.now(),actualizadoPor:S.email},{merge:true}),'Reserva guardada');
+}
+async function archivarReserva(id){ const d=reservaDe(id); if(d) await escribir(db.collection(RES_COL).doc(id).set({archivado:!d.archivado,actualizado:Date.now(),actualizadoPor:S.email},{merge:true}),d.archivado?'Reserva reactivada':'Reserva archivada'); }
+async function borrarReserva(id){
+  const d=reservaDe(id); if(!d) return;
+  const nOC=S.ocs.filter(o=>o.destinoId===id).length, nMat=materialesReservados(d).length;
+  if(nOC||nMat) return toast(`No se puede borrar: se usa en ${[nOC?nOC+' OC':'',nMat?nMat+' material(es) de StockApp':''].filter(Boolean).join(' y ')}. Archivala.`,4500);
+  if(!confirm(`¿Borrar la reserva "${d.nombre}"? Se borra también en StockApp y ProducciónApp.`)) return;
+  await escribir(db.collection(RES_COL).doc(id).delete(),'Reserva borrada');
 }
 // --- Semáforo y unidades ---
 async function guardarSemaforo(){
@@ -1546,13 +1671,13 @@ async function compartirApp(){
 function celda(v){ if(v==null) return ''; if(typeof v==='number') return String(v).replace('.',','); return '"'+String(v).replace(/"/g,'""')+'"'; }
 function aCSV(filas){ return '\ufeff'+filas.map(f=>f.map(celda).join(';')).join('\r\n'); }
 function exportarOCsCSV(){
-  const f=[['Número','Estado','Fecha emisión','Fecha necesidad','Proveedor','CUIT proveedor','Razón social','CUIT razón social','Destino','Código destino','Moneda','Tipo de cambio','Discrimina IVA','IVA %','Subtotal','IVA','Total','Condición de pago','Lugar de entrega','N° factura','Fecha factura','Monto facturado','Fecha pago','Forma de pago','Observaciones']];
+  const f=[['Número','Estado','Fecha emisión','Fecha necesidad','Proveedor','CUIT proveedor','Razón social','CUIT razón social','Reserva','Código reserva','Cliente','Moneda','Tipo de cambio','Discrimina IVA','IVA %','Subtotal','IVA','Total','Condición de pago','Lugar de entrega','N° factura','Fecha factura','Monto facturado','Fecha pago','Forma de pago','Observaciones']];
   S.ocs.forEach(o=>{ const p=o.proveedorSnap||{}, r=o.razonSnap||{}, d=o.destinoSnap||{}, fa=o.factura||{}, pa=o.pago||{};
-    f.push([o.numero,nombreEstado(o.estado),fmtFecha(o.fechaEmision),fmtFecha(o.fechaNecesidad),p.razonSocial,p.cuit,r.nombre,r.cuit,d.nombre,d.codigo,o.moneda,o.tipoCambio,o.discriminarIva?'Sí':'No',o.ivaPct,o.subtotal,o.iva,o.total,o.condicionPago,o.lugarEntrega,fa.numero,fa.fecha?fmtFecha(fa.fecha):'',fa.monto,pa.fecha?fmtFecha(pa.fecha):'',pa.forma,o.observaciones]); });
+    f.push([o.numero,nombreEstado(o.estado),fmtFecha(o.fechaEmision),fmtFecha(o.fechaNecesidad),p.razonSocial,p.cuit,r.nombre,r.cuit,d.nombre,d.codigo,d.cliente,o.moneda,o.tipoCambio,o.discriminarIva?'Sí':'No',o.ivaPct,o.subtotal,o.iva,o.total,o.condicionPago,o.lugarEntrega,fa.numero,fa.fecha?fmtFecha(fa.fecha):'',fa.monto,pa.fecha?fmtFecha(pa.fecha):'',pa.forma,o.observaciones]); });
   descargar('ComprasApp_OC_'+hoy()+'.csv',aCSV(f),'text/csv;charset=utf-8');
 }
 function exportarItemsCSV(){
-  const f=[['Número OC','Estado','Fecha emisión','Proveedor','Destino','Moneda','Ítem','Código','Descripción','Cantidad','Unidad','Precio unitario','Total ítem']];
+  const f=[['Número OC','Estado','Fecha emisión','Proveedor','Reserva','Moneda','Ítem','Código','Descripción','Cantidad','Unidad','Precio unitario','Total ítem']];
   S.ocs.forEach(o=>(o.items||[]).forEach(it=>f.push([o.numero,nombreEstado(o.estado),fmtFecha(o.fechaEmision),(o.proveedorSnap||{}).razonSocial,(o.destinoSnap||{}).nombre,o.moneda,it.n,it.codigo,it.descripcion,it.cantidad,it.unidad,it.precioUnit,it.total])));
   descargar('ComprasApp_items_'+hoy()+'.csv',aCSV(f),'text/csv;charset=utf-8');
 }
@@ -1565,9 +1690,9 @@ function limpiar(v){
 }
 async function exportarRespaldo(){
   try{
-    const [oc,pr,co,cf,re,pc]=await Promise.all([db.collection(COL.oc).get(),db.collection(COL.prov).get(),db.collection(COL.cont).get(),db.doc(COL.cfg+'/general').get(),db.collection(COL.rec).get(),db.collection(COL.precios).get()]);
+    const [oc,pr,co,cf,re,pc,rs]=await Promise.all([db.collection(COL.oc).get(),db.collection(COL.prov).get(),db.collection(COL.cont).get(),db.doc(COL.cfg+'/general').get(),db.collection(COL.rec).get(),db.collection(COL.precios).get(),db.collection(RES_COL).get()]);
     const docs=q=>q.docs.map(d=>({id:d.id,...limpiar(d.data())}));
-    const data={app:'ComprasApp',version:1,fecha:new Date().toISOString(),config:cf.exists?limpiar(cf.data()):null,proveedores:docs(pr),oc:docs(oc),contadores:docs(co),recepciones:docs(re),precios:docs(pc)};
+    const data={app:'ComprasApp',version:1,fecha:new Date().toISOString(),config:cf.exists?limpiar(cf.data()):null,proveedores:docs(pr),oc:docs(oc),contadores:docs(co),recepciones:docs(re),precios:docs(pc),reservas:docs(rs)};
     descargar('ComprasApp_respaldo_'+hoy()+'.json',JSON.stringify(data),'application/json');
   }catch(e){ errorFS(e); }
 }
@@ -1585,6 +1710,7 @@ async function importarRespaldo(input){
   (d.contadores||[]).forEach(c=>ops.push([db.collection(COL.cont).doc(c.id),sinId(c)]));
   (d.recepciones||[]).forEach(r=>ops.push([db.collection(COL.rec).doc(r.id),sinId(r)]));
   (d.precios||[]).forEach(x=>ops.push([db.collection(COL.precios).doc(x.id),sinId(x)]));
+  (d.reservas||[]).forEach(x=>ops.push([db.collection(RES_COL).doc(x.id),sinId(x)]));
   try{
     for(let i=0;i<ops.length;i+=400){ const b=db.batch(); ops.slice(i,i+400).forEach(([ref,data])=>b.set(ref,data,{merge:true})); await b.commit(); }
     toast('Respaldo importado');

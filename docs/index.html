@@ -331,7 +331,8 @@ const nombreEstado = id => (ESTADOS.find(e=>e.id===id)||{}).nombre || id;
 
 function toast(msg,ms=2800){ const t=$('toast'); t.textContent=msg; t.style.display='block'; clearTimeout(t._h); t._h=setTimeout(()=>t.style.display='none',ms); }
 function abrirModal(html,clase){ $('modal-caja').className='caja '+(clase||''); $('modal-caja').innerHTML=html; $('modal').classList.add('abierto'); }
-function cerrarModal(){ $('modal').classList.remove('abierto'); }
+let MODAL_AL_CERRAR=null;   // acción al cerrar la ventana tocando afuera (la usa la ventana de costos)
+function cerrarModal(){ $('modal').classList.remove('abierto'); if(MODAL_AL_CERRAR){ const f=MODAL_AL_CERRAR; MODAL_AL_CERRAR=null; f(); } }
 // Mensajes de error de Firestore entendibles
 function errorFS(e){ console.error(e); if(e&&e.code==='permission-denied') toast('Sin permiso para esta acción (revisá las reglas o los correos autorizados).',4000); else toast('Error: '+(e&&e.message||e),4000); }
 // Ejecuta una escritura: con internet espera la confirmación; sin internet queda en cola
@@ -693,7 +694,7 @@ function renderItems(){
     <label>Descripción</label><input value="${esc(it.descripcion)}" ${v?'readonly':''} oninput="setItem(${i},'descripcion',this.value)" onchange="autoVincularItem(${i})">
     <div class="fila">
       <div><label>Código${v?'':' (opcional)'}</label><input value="${esc(it.codigo)}" ${v?'readonly':''} oninput="setItem(${i},'codigo',this.value)"></div>
-      <div><label>Unidad</label><select ${v?'disabled':''} onchange="setItem(${i},'unidad',this.value)">${opcionesUnidad(it.unidad)}</select></div>
+      <div><label>Unidad${v?' de compra':''}</label><select onchange="setItem(${i},'unidad',this.value)">${opcionesUnidad(it.unidad)}</select></div>
     </div>
     <div class="fila">
       <div><label>Cantidad</label><input type="number" inputmode="decimal" step="any" value="${it.cantidad}" oninput="setItem(${i},'cantidad',this.value)"></div>
@@ -719,8 +720,10 @@ function pistaPrecio(i){
       partes.push(`Último a este proveedor: <b>${fmtMon(u.precio,u.moneda)}</b> · ${fmtFecha(u.fecha)} · ${esc(u.numero)}${pc!=null?` <button class="btn chico" onclick="usarPrecio(${i},${redondear(pc)})">Usar</button>`:''}`); }
   }
   const si=it.stockId&&S.stock.items.find(x=>x.id===it.stockId);
-  if(si&&num(si.costo)>0){ const mo=si.moneda||'USD', pc=convertir(num(si.costo),mo,f.moneda,f.tipoCambio);
-    partes.push(`Costo en StockApp: ${fmtMon(si.costo,mo)}${pc!=null&&mo!==f.moneda?` (≈ ${fmtMon(pc,f.moneda)})`:''}${pc!=null?` <button class="btn chico" onclick="usarPrecio(${i},${redondear(pc)})">Usar</button>`:''}`); }
+  if(si&&num(si.costo)>0){ const mo=si.moneda||'USD', ci=si.costoInfo||{}, pc=convertir(num(si.costo),mo,f.moneda,f.tipoCambio);
+    const de=ci.origen==='ComprasApp'&&ci.oc?' · '+esc(ci.oc):ci.origen==='StockApp'?' · cargado a mano':'';
+    const mismaU=uniN(it.unidad)===uniN(si.unidad);   // "Usar" solo si el costo está en la misma unidad que la OC
+    partes.push(`Costo en StockApp: <b>${fmtCosto(si.costo,mo)}</b> por ${esc(si.unidad||'un')}${de}${pc!=null&&mo!==f.moneda?` (≈ ${fmtMon(pc,f.moneda)})`:''}${pc!=null&&mismaU?` <button class="btn chico" onclick="usarPrecio(${i},${redondear(pc)})">Usar</button>`:''}`); }
   return partes.join('<br>');
 }
 function usarPrecio(i,v){ S.form.items[i].precioUnit=v; renderItems(); renderTotales(); }
@@ -938,9 +941,9 @@ async function emitirOC(id){
     historial:firebase.firestore.FieldValue.arrayUnion(entradaHist('emitida'))}),'OC emitida');
   alEmitir(o);
 }
-// Al emitir: guarda los precios en el historial y marca "pedido en curso" en StockApp
-function alEmitir(o){
-  const b=db.batch(); let n=0;
+// Al emitir: guarda los precios en el historial, marca "pedido en curso" y actualiza el costo en StockApp
+async function alEmitir(o){
+  const b=db.batch(), pat={}; let n=0;
   (o.items||[]).forEach(it=>{
     if(o.proveedorId && num(it.precioUnit)>0 && (it.codigo||String(it.descripcion||'').trim())){
       const e={precio:num(it.precioUnit),moneda:o.moneda,fecha:o.fechaEmision,numero:o.numero,ocId:o.id,conIva:!o.discriminarIva};
@@ -948,11 +951,174 @@ function alEmitir(o){
         codigo:it.codigo||'',descripcion:it.descripcion,ultimo:e,lista:firebase.firestore.FieldValue.arrayUnion(e),actualizado:ts()},{merge:true}); n++;
     }
     if(it.stockId && S.stock.items.some(x=>x.id===it.stockId) && num(it.cantRecibida)<num(it.cantidad)){
-      b.set(db.collection(SCOL.items).doc(it.stockId),{pedidoCurso:{fecha:Date.now(),cantidad:num(it.cantidad),oc:o.numero},actualizado:Date.now()},{merge:true}); n++;
+      pat[it.stockId]={pedidoCurso:{fecha:Date.now(),cantidad:num(it.cantidad),oc:o.numero,_k:o.items.indexOf(it)},actualizado:Date.now()};
     }
   });
-  if(n) escribir(b.commit());
+  const nc=await costosEnPatches(o,pat);   // costo, moneda, costoInfo y costoHist van en el mismo update del ítem
+  Object.entries(pat).forEach(([id,p])=>{ b.set(db.collection(SCOL.items).doc(id),p,{merge:true}); n++; });
+  if(n){ const ok=await escribir(b.commit()); if(ok&&nc&&navigator.onLine) toast(`${nc} costo${nc===1?'':'s'} actualizado${nc===1?'':'s'} en StockApp`); }
 }
+
+// =====================================================================
+// 8a) COSTO DE LOS MATERIALES EN STOCKAPP (solo al emitir la OC)
+// Costo = precio de la OC sin IVA, en USD, por unidad de stock (precio × factor)
+// =====================================================================
+const r4 = n => Math.round(n*10000)/10000;
+const LARGO_BARRA = {aceros:6000, noferrosos:3000, plasticos:1000};   // mm, si la ficha no tiene largo
+function fmtCosto(n,mo){ return (mo==='ARS'?'$ ':'US$ ')+num(n).toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:4}); }
+// Unidad normalizada para comparar (u, un, unidad → un · kgs → kg · mts → m)
+function uniN(u){
+  const t=normTxt(u).replace(/[.\s]/g,''); if(!t) return '';
+  if(['u','un','und','unid','unidad','unidades','pza','pieza','piezas','c/u'].includes(t)) return 'un';
+  if(['kg','kgs','kilo','kilos','kilogramo','kilogramos'].includes(t)) return 'kg';
+  if(['m','mt','mts','metro','metros','ml'].includes(t)) return 'm';
+  if(['barra','barras'].includes(t)) return 'barra';
+  return t;
+}
+// Precio sin IVA (la OC ya tiene los descuentos aplicados en el precio unitario)
+function netoSinIva(precio,o){ return o.discriminarIva ? num(precio) : num(precio)/(1+(num(o.ivaPct)||21)/100); }
+// Dólar de la OC en pesos (el de métricas); si no tiene, el de StockApp
+function dolarCosto(o){ return num(o.tcMetricas)||num(o.tipoCambio)||num((S.stock.cfg||{}).dolar)||0; }
+// Cuántas unidades de la OC entran en 1 unidad de stock. f=0: no se puede deducir
+function factorCosto(it,si){
+  const uo=uniN(it.unidad), us=uniN(si.unidad);
+  if(!uo||!us||uo===us) return {f:1,como:'misma unidad'};
+  if(uo==='kg'&&num(si.kgUn)>0) return {f:num(si.kgUn),como:`1 ${si.unidad} = ${fmtCant(si.kgUn)} kg`};
+  if(uo==='un'&&num(si.porPack)>1) return {f:num(si.porPack),como:`1 ${si.unidad} = ${fmtCant(si.porPack)} un`};
+  if(uo==='m'&&(us==='un'||us==='barra')){ const l=num((si.medidas||{}).largo)||LARGO_BARRA[si.area]||0;
+    if(l) return {f:l/1000,como:`barra de ${fmtCant(l/1000)} m`}; }
+  const ci=si.costoInfo; if(ci&&uniN(ci.unidadOC)===uo&&num(ci.factor)>0) return {f:num(ci.factor),como:`factor usado en ${ci.oc||'la compra anterior'}`,propuesto:true};
+  return {f:0,como:''};
+}
+// Renglones vinculados con StockApp que llevan costo (uno por material)
+function calcCostos(o,soloK,fx){
+  const l=[], vistos=new Set();
+  (o.items||[]).forEach((it,k)=>{
+    if(soloK!=null&&k!==soloK) return;
+    const si=it.stockId&&S.stock.items.find(x=>x.id===it.stockId);
+    if(!si||!(num(it.precioUnit)>0)||vistos.has(si.id)) return; vistos.add(si.id);
+    const ci=si.costoInfo||{}, fa=fx&&num(fx[k])>0?{f:num(fx[k]),como:'el que cargaste al vincular'}:factorCosto(it,si);
+    l.push({k,it,si,neto:netoSinIva(it.precioUnit,o),factor:fa.f,como:fa.como,propuesto:!!fa.propuesto,
+      misma:!!ci.oc&&ci.oc===o.numero, manual:ci.origen==='StockApp'&&num(si.costo)>0});
+  });
+  return l;
+}
+// Calcula costo nuevo, actual (en USD) y % de cambio de un renglón
+function evalCosto(l,o,tc,pct){
+  const tcC=tc||num((S.stock.cfg||{}).dolar);
+  l.precioUSD=o.moneda==='USD'?l.neto:(tc>0?l.neto/tc:null);
+  l.nuevo=l.precioUSD!=null&&l.factor>0?r4(l.precioUSD*l.factor):null;
+  // si se re-emite la misma OC, se compara con el costo que había antes de esta OC
+  const base=l.misma?((l.si.costoHist||[])[0]||null):{costo:l.si.costo,moneda:l.si.moneda};
+  const c=num(base&&base.costo), mo=(base&&base.moneda)||'USD';
+  l.actual=c>0?(mo==='USD'?c:(tcC?c/tcC:null)):null;
+  l.dif=l.actual>0&&l.nuevo!=null?(l.nuevo-l.actual)/l.actual*100:null;
+  l.grande=l.dif!=null&&Math.abs(l.dif)>=pct;
+  l.sinCambio=l.nuevo!=null&&num(l.si.costo)===l.nuevo&&(l.si.moneda||'USD')==='USD';
+}
+// Devuelve (promesa) los renglones a actualizar; si alguno lo necesita, pregunta en una sola ventana
+let COSTO=null;
+function planCostos(o,soloK,fx){
+  const l=calcCostos(o,soloK,fx), conTodas=sel=>{ sel.todas=l; return sel; }; if(!l.length) return Promise.resolve(conTodas([]));
+  const pct=num((S.stock.cfg||{}).costoAvisoPct)||25, tc=o.moneda==='ARS'?dolarCosto(o):0, pideTc=o.moneda==='ARS'&&!tc;
+  l.forEach(x=>{ evalCosto(x,o,tc,pct);
+    x.preguntar=pideTc||(!x.sinCambio&&(x.factor<=0||x.grande||x.manual||(x.propuesto&&!x.misma)));
+    x.tipo=x.factor<=0?'factor':'act'; });
+  if(!l.some(x=>x.preguntar)) return Promise.resolve(conTodas(l.filter(x=>x.nuevo!=null)));
+  return new Promise(res=>{ COSTO={o,l,pct,tc,pideTc,res:sel=>res(conTodas(sel))}; modalCostos(); });
+}
+function resumenCosto(l,C){
+  if(l.nuevo==null) return `<div class="muted">${C.pideTc&&!(C.tc>0)?'Falta el dólar para calcularlo.':'Falta el factor para calcularlo.'}</div>`;
+  const u=esc(l.si.unidad||'un'), d=l.dif!=null?` <b class="${l.grande?'txt-rojo':''}">(${l.dif>0?'+':''}${fmtNum(l.dif,1)} %)</b>`:'';
+  return `<div>${l.actual!=null?`Actual ${fmtCosto(l.actual)} → `:'Sin costo actual → '}<b>Nuevo ${fmtCosto(l.nuevo)}</b> por ${u}${d}</div>`
+    +(l.grande?`<div class="pista txt-rojo">Cambio de ${fmtNum(Math.abs(l.dif),1)} % (se avisa desde ${fmtNum(C.pct,0)} %): puede ser una compra de urgencia o un precio fuera de lo normal. Marcá "Actualizar" solo si es el precio habitual.</div>`:'');
+}
+function modalCostos(){
+  const C=COSTO, o=C.o, P=C.l.filter(x=>x.preguntar), otras=C.l.filter(x=>!x.preguntar&&x.nuevo!=null).length;
+  abrirModal(`<h3>Costo en StockApp · ${esc(o.numero)}</h3>
+    <p class="muted">Costo en USD sin IVA, por unidad de stock. Revisá estos renglones:</p>
+    ${C.pideTc?`<label for="cs-tc">Dólar para pasar a USD (pesos por dólar)</label><input id="cs-tc" type="number" inputmode="decimal" step="any" oninput="costoTc(this.value)">
+      <div class="pista txt-amarillo">La OC está en pesos y no tiene dólar (tampoco hay uno cargado en StockApp).</div>`:''}
+    ${P.map(l=>{ const i=C.l.indexOf(l), un=esc(l.it.unidad||'un'), us=esc(l.si.unidad||'un');
+      return `<div class="item"><div class="item-h"><span>Ítem ${l.it.n} · ${esc(l.si.codigo)}</span></div>
+        <div>${esc(l.si.descripcion)}</div>
+        <div class="muted">OC: ${fmtMon(l.it.precioUnit,o.moneda)} / ${un} ${o.discriminarIva?'sin IVA':'con IVA'}${o.moneda==='ARS'?`<span id="cs-u${i}">${l.precioUSD!=null?' → '+fmtCosto(l.precioUSD)+' sin IVA':''}</span>`:''}</div>
+        ${l.tipo==='factor'||l.propuesto?`<label for="cs-f${i}">¿Cuántos ${un} entran en 1 ${us}?</label><input id="cs-f${i}" type="number" inputmode="decimal" step="any" value="${l.factor||''}" oninput="costoFactor(${i},this.value)">
+          ${l.propuesto?`<div class="pista">Propuesto: ${esc(l.como)}.</div>`:''}`:`<div class="muted">Factor ${fmtCant(l.factor)} (${esc(l.como)})</div>`}
+        <div id="cs-r${i}" style="margin-top:6px">${resumenCosto(l,C)}</div>
+        ${l.manual?`<div class="pista txt-amarillo">Reemplaza el costo cargado a mano en StockApp.</div>`:''}
+        ${l.tipo==='factor'?`<label class="chk"><input type="checkbox" id="cs-no${i}"><span>No actualizar el costo de este renglón</span></label>`
+          :`<label class="chk"><input type="checkbox" id="cs-ok${i}" ${l.grande?'':'checked'}><span>Actualizar</span></label>`}</div>`; }).join('')}
+    ${otras?`<div class="pista">Además se actualizan ${otras} costo${otras===1?'':'s'} sin diferencias grandes.</div>`:''}
+    <div class="acciones"><button class="btn" onclick="cerrarCostos(false)">No actualizar estos</button><button class="btn pri" onclick="cerrarCostos(true)">Guardar costos</button></div>`);
+  MODAL_AL_CERRAR=()=>finCostos(false);   // tocar afuera = no actualizar los renglones de la ventana
+}
+function refrescarCosto(i){ const C=COSTO, l=C.l[i]; evalCosto(l,C.o,C.tc,C.pct); if($('cs-r'+i)) $('cs-r'+i).innerHTML=resumenCosto(l,C);
+  if($('cs-u'+i)) $('cs-u'+i).textContent=l.precioUSD!=null?' → '+fmtCosto(l.precioUSD)+' sin IVA':''; }
+function costoFactor(i,v){ if(!COSTO) return; COSTO.l[i].factor=num(v); refrescarCosto(i); }
+function costoTc(v){ const C=COSTO; if(!C) return; C.tc=num(v);
+  C.l.forEach((l,i)=>{ refrescarCosto(i); if($('cs-ok'+i)) $('cs-ok'+i).checked=!l.grande; }); }
+function elegidosCostos(guardar){
+  const C=COSTO;
+  return C.l.filter((l,i)=>{ if(l.nuevo==null) return false; if(!l.preguntar) return true; if(!guardar) return false;
+    return l.tipo==='factor' ? !($('cs-no'+i)&&$('cs-no'+i).checked) : !!($('cs-ok'+i)&&$('cs-ok'+i).checked); });
+}
+function cerrarCostos(guardar){
+  const C=COSTO; if(!C) return;
+  if(guardar){
+    if(C.pideTc&&!(C.tc>0)) return toast('Cargá el dólar o tocá "No actualizar estos"');
+    const falta=C.l.find((l,i)=>l.preguntar&&l.tipo==='factor'&&!(l.factor>0)&&!($('cs-no'+i)&&$('cs-no'+i).checked));
+    if(falta) return toast(`Completá el factor del ítem ${falta.it.n} o marcá "No actualizar el costo de este renglón"`,4000);
+  }
+  const sel=elegidosCostos(guardar); MODAL_AL_CERRAR=null; COSTO=null; cerrarModal(); C.res(sel);
+}
+function finCostos(guardar){ const C=COSTO; if(!C) return; const sel=elegidosCostos(guardar); COSTO=null; C.res(sel); }
+// Campos que se escriben en el ítem de StockApp
+function patchCosto(l,o){
+  const si=l.si, ci=si.costoInfo||null;
+  const p={costoInfo:{fecha:Date.now(),origen:'ComprasApp',usuario:S.nombre,email:S.email,oc:o.numero,proveedor:(o.proveedorSnap||{}).razonSocial||'',
+    precio:r4(l.precioUSD),unidadOC:l.it.unidad||'',factor:l.factor}};
+  if(l.sinCambio) return p;                         // mismo costo: solo se actualiza de dónde sale
+  p.costo=l.nuevo; p.moneda='USD';
+  if(!(ci&&ci.oc===o.numero) && num(si.costo)>0)     // misma OC (re-emitida o corregida): no suma historial
+    p.costoHist=[{costo:num(si.costo),moneda:si.moneda||'USD',fecha:(ci&&ci.fecha)||si.actualizado||Date.now(),origen:(ci&&ci.origen)||'',
+      usuario:(ci&&ci.usuario)||'',oc:(ci&&ci.oc)||'',proveedor:(ci&&ci.proveedor)||''},...(si.costoHist||[])].slice(0,40);
+  return p;
+}
+// Agrega el costo a los cambios de cada ítem; devuelve cuántos costos se actualizan
+async function costosEnPatches(o,pat,soloK,fx){
+  const l=await planCostos(o,soloK,fx);
+  l.forEach(x=>{ pat[x.si.id]={...(pat[x.si.id]||{}),...patchCosto(x,o),actualizado:Date.now()}; });
+  // el pedido en curso va en unidades de stock: usa el factor de la ventana si se cargó ahí
+  Object.entries(pat).forEach(([id,p])=>{ if(!p.pedidoCurso||p.pedidoCurso._k==null) return;
+    const k=p.pedidoCurso._k; delete p.pedidoCurso._k;
+    const it=o.items[k], si=S.stock.items.find(x=>x.id===id), lx=l.todas.find(x=>x.si.id===id&&x.factor>0);
+    const f=lx?lx.factor:(si?factorRecep(o,it,si).f:1); if(f>0) p.pedidoCurso.cantidad=aStock(p.pedidoCurso.cantidad,f); });
+  return l.length;
+}
+// ---- Conversión de cantidades: unidad de la OC → unidad de stock ----
+const aStock=(q,f)=>f>0?r3(num(q)/f):0;
+const mismaUnidad=(it,si)=>!uniN(it.unidad)||!uniN(si.unidad)||uniN(it.unidad)===uniN(si.unidad);
+// Factor para la recepción: el de esta OC (guardado al emitir) o el que se deduce. fijo = no hace falta preguntarlo
+function factorRecep(o,it,si){
+  if(mismaUnidad(it,si)) return {f:1,fijo:true,como:'misma unidad'};
+  const ci=si.costoInfo;
+  if(ci&&ci.oc===o.numero&&uniN(ci.unidadOC)===uniN(it.unidad)&&num(ci.factor)>0) return {f:num(ci.factor),fijo:true,como:`factor de esta OC: 1 ${si.unidad} = ${fmtCant(ci.factor)} ${it.unidad}`};
+  const fa=factorCosto(it,si); return {f:fa.f,fijo:fa.f>0&&!fa.propuesto,como:fa.como};
+}
+// Campo del factor (si no se deduce) y renglón "= N unidades de stock". qid = id del campo de cantidad
+function campoConv(id,qid,o,it,si){
+  if(mismaUnidad(it,si)) return '';
+  const fa=factorRecep(o,it,si), un=esc(it.unidad), us=esc(si.unidad);
+  return (fa.fijo?`<input type="hidden" id="${id}" value="${fa.f}">`
+    :`<label for="${id}">¿Cuántos ${un} entran en 1 ${us}?</label><input id="${id}" type="number" inputmode="decimal" step="any" value="${fa.f||''}" oninput="pistaConv('${id}','${qid}')">${fa.f?`<div class="pista">Propuesto: ${esc(fa.como)}.</div>`:''}`)
+    +`<div class="pista" id="${id}-p" data-us="${us}" data-como="${fa.fijo?esc(fa.como):''}"></div>`;
+}
+function pistaConv(id,qid){
+  const el=$(id+'-p'); if(!el) return; const f=num($(id).value), q=$(qid)?num($(qid).value):0;
+  el.innerHTML=f>0?`Entra al stock: <b>${fmtCant(aStock(q,f))} ${el.dataset.us}</b>${el.dataset.como?' ('+el.dataset.como+')':''}`:'<span class="txt-amarillo">Completá el factor para pasarlo a la unidad de stock.</span>';
+}
+function factorDe(id){ return $(id)?num($(id).value):1; }
 // Al anular: quita el "pedido en curso" que había marcado esta OC
 function quitarPedidos(o){
   const b=db.batch(); let n=0;
@@ -1040,7 +1206,8 @@ function elegirMaterial(id,datos){
   const m=datos||S.stock.items.find(x=>x.id===id), it=S.form&&S.form.items[S.matItem]; if(!m||!it) return;
   const antes=String(it.descripcion||'').trim();
   if(antes&&claveVinc(antes)!==claveVinc(descMaterial(m))) recordarVinculo(antes,{...m,id});   // la próxima vez esa descripción se vincula sola
-  Object.assign(it,{stockId:id, area:m.area, codigo:m.codigo, descripcion:descMaterial(m), unidad:m.unidad||it.unidad});
+  // la unidad de compra se respeta si el renglón ya tenía precio; si es nuevo, arranca con la de StockApp
+  Object.assign(it,{stockId:id, area:m.area, codigo:m.codigo, descripcion:descMaterial(m), unidad:(num(it.precioUnit)>0&&it.unidad)?it.unidad:(m.unidad||it.unidad)});
   // si no tiene precio, toma el último pagado a este proveedor (misma moneda)
   const pr=S.form.proveedorId&&S.precios[idPrecio(S.form.proveedorId,it)];
   if(!num(it.precioUnit) && pr && pr.ultimo && pr.ultimo.moneda===S.form.moneda) it.precioUnit=pr.ultimo.precio;
@@ -1062,7 +1229,7 @@ function modalNuevoMaterial(){
       <div class="fila"><div><label for="nm-anc">Ancho (mm)</label><input id="nm-anc" type="number" inputmode="decimal" step="any"></div>
       <div><label for="nm-lar">Largo (mm)</label><input id="nm-lar" type="number" inputmode="decimal" step="any"></div></div></div>
     <div class="fila"><div><label for="nm-marca">Marca (opcional)</label><input id="nm-marca"></div><div><label for="nm-prov">Proveedor</label><input id="nm-prov" value="${esc(prov?prov.razonSocial:'')}"></div></div>
-    <p class="muted">Se crea con stock 0, mínimo 0 (sin aviso de compra) y como stock de pedido la cantidad de esta OC. El costo sale del precio de la OC. Después lo podés ajustar en StockApp.</p>
+    <p class="muted">Se crea con stock 0, mínimo 0 (sin aviso de compra) y como stock de pedido la cantidad de esta OC. El costo se carga solo al emitir la OC (en USD, sin IVA).</p>
     <div class="acciones"><button class="btn" onclick="modalMaterial(S.matItem)">Volver</button><button class="btn pri" id="nm-ok" onclick="crearMaterial()">Crear material</button></div>`);
   nmCats();
 }
@@ -1076,8 +1243,6 @@ function nmSubs(){
   const a=$('nm-area').value, cat=(((S.stock.cfg||{}).categorias||{})[a]||[]).find(x=>x.id===$('nm-cat').value);
   $('nm-sub').innerHTML=opcionesLista(cat?cat.subs||[]:[],'','Sin subcategoría');
 }
-// Costo para StockApp: sin IVA (si la OC tiene precios finales, se le saca el IVA)
-function costoNeto(precio,o){ return o.discriminarIva ? num(precio) : redondear(num(precio)/(1+(num(o.ivaPct)||21)/100)); }
 async function crearMaterial(){
   const a=$('nm-area').value, desc=$('nm-desc').value.trim(); if(!desc) return toast('Escribí la descripción');
   if(!navigator.onLine) return toast('Para crear un material se necesita internet (se asigna el código).',4000);
@@ -1085,7 +1250,7 @@ async function crearMaterial(){
   const sub=cat&&(cat.subs||[]).find(x=>x.id===$('nm-sub').value);
   const base={descripcion:desc, catId:cat?cat.id:'', subId:sub?sub.id:'', unidad:$('nm-uni').value, minimo:0, cantPedido:num(it.cantidad)>0?num(it.cantidad):1,
     marca:$('nm-marca').value.trim(), proveedor:$('nm-prov').value.trim(), marcasSug:[], ubicacion:'', obs:'Alta desde ComprasApp', plazo:0,
-    costo:costoNeto(it.precioUnit,S.form), moneda:S.form.moneda, material:$('nm-mat').value.trim(), area:a, stock:0, pedidoCurso:null, creado:Date.now(), actualizado:Date.now()};
+    costo:0, moneda:'USD', material:$('nm-mat').value.trim(), area:a, stock:0, pedidoCurso:null, creado:Date.now(), actualizado:Date.now()};
   if(AREAS[a].tec){ base.formato=sub?sub.nombre:''; base.medidas={espesor:num($('nm-esp').value),diametro:num($('nm-dia').value),ancho:num($('nm-anc').value),largo:num($('nm-lar').value)}; }
   $('nm-ok').disabled=true;
   try{ const r=await crearItemStock(base); toast('Material '+r.codigo+' creado en StockApp'); elegirMaterial(r.id,{...base,codigo:r.codigo}); }
@@ -1126,7 +1291,7 @@ function materialPara(desc){
 function autoVincular(it){
   if(it.stockId||!String(it.descripcion||'').trim()) return false;
   const m=materialPara(it.descripcion); if(!m) return false;
-  Object.assign(it,{stockId:m.id,area:m.area,codigo:m.codigo,unidad:m.unidad||it.unidad}); return true;
+  Object.assign(it,{stockId:m.id,area:m.area,codigo:m.codigo,unidad:it.unidad||m.unidad}); return true;   // respeta la unidad de compra (pegada de la planilla)
 }
 function autoVincularItem(i){ if(S.form&&autoVincular(S.form.items[i])){ renderItems(); renderTotales(); toast('Ítem '+(i+1)+' vinculado a '+S.form.items[i].codigo); } }
 let VINC_KEYS=[];
@@ -1164,40 +1329,44 @@ function listaVinc(){
 }
 function confirmarVinculo(mid){
   const o=S.ocs.find(x=>x.id===VINC.oc), it=o.items[VINC.k], m=S.stock.items.find(x=>x.id===mid); if(!m) return;
-  const rec=num(it.cantRecibida), r=resItem(o,it), otraU=it.unidad&&m.unidad&&normTxt(it.unidad)!==normTxt(m.unidad);
+  const rec=num(it.cantRecibida), r=resItem(o,it), otraU=!mismaUnidad(it,m);
   abrirModal(`<h3>Confirmar vínculo</h3>
     <div class="item"><div class="muted">Ítem ${it.n} de ${esc(o.numero)}</div><b>${esc(it.descripcion)}</b>
       <div style="margin-top:8px" class="muted">se vincula con</div><b>${esc(m.codigo)} · ${esc(m.descripcion)}</b></div>
-    <p class="muted">El vínculo queda guardado en la OC: las próximas recepciones de este ítem van directo a StockApp. La descripción de la OC no cambia${otraU?`; la unidad pasa de "${esc(it.unidad)}" a "${esc(m.unidad)}" (la de StockApp)`:''}.</p>
-    ${rec>0?`<label class="chk"><input type="checkbox" id="vc-stock" checked><span>Cargar al stock lo ya recibido: <b>${fmtCant(rec)} ${esc(m.unidad||it.unidad)}</b></span></label>
-      <label class="chk"><input type="checkbox" id="vc-costo" checked><span>Actualizar el costo con el precio de esta OC</span></label>
+    <p class="muted">El vínculo queda guardado en la OC: las próximas recepciones de este ítem van directo a StockApp. La descripción y la unidad de la OC no cambian${otraU?` (la OC está en "${esc(it.unidad)}" y StockApp en "${esc(m.unidad)}": se convierte)`:''}.</p>
+    <input type="hidden" id="vc-q" value="${rec>0?rec:num(it.cantidad)}">${campoConv('vc-f','vc-q',o,it,m)}
+    ${rec>0?`<label class="chk"><input type="checkbox" id="vc-stock" checked><span>Cargar al stock lo ya recibido: <b>${fmtCant(rec)} ${esc(it.unidad||m.unidad)}</b></span></label>
       <label for="vc-res">Reservar lo recibido para</label><select id="vc-res">${opcionesDestino(r?r.id:'-','rec',r)}</select>`:''}
     <div class="acciones"><button class="btn" onclick="modalVincular('${o.id}',${VINC.k})">Volver</button><button class="btn pri" id="vc-ok" onclick="guardarVinculo('${mid}')">Vincular</button></div>`);
+  if($('vc-f')) pistaConv('vc-f','vc-q');
 }
 async function guardarVinculo(mid){
   const o=S.ocs.find(x=>x.id===VINC.oc), k=VINC.k, it=o.items[k], m=S.stock.items.find(x=>x.id===mid); if(!o||!m) return;
-  const rec=num(it.cantRecibida), alStock=rec>0&&$('vc-stock')&&$('vc-stock').checked, conCosto=alStock&&$('vc-costo')&&$('vc-costo').checked;
+  const rec=num(it.cantRecibida), alStock=rec>0&&$('vc-stock')&&$('vc-stock').checked, f=factorDe('vc-f');
+  if(alStock&&!(f>0)) return toast(`Completá cuántos ${it.unidad} entran en 1 ${m.unidad}`,4000);
+  const recS=aStock(rec,f>0?f:1);   // lo recibido, en unidades de stock
   const rv=alStock&&$('vc-res')?$('vc-res').value:'-', res=rv&&rv!=='-'?(reservaDe(rv)||resItem(o,it)):null;
-  const items=o.items.map((x,i)=>i===k?{...x,stockId:m.id,codigo:m.codigo,area:m.area,unidad:m.unidad||x.unidad}:x);
+  const items=o.items.map((x,i)=>i===k?{...x,stockId:m.id,codigo:m.codigo,area:m.area,unidad:x.unidad||m.unidad}:x);
   recordarVinculo(it.descripcion,m);
   const b=db.batch(), patch={actualizado:Date.now()}, movs=[];
   const ant=it.stockId&&it.stockId!==m.id&&S.stock.items.find(x=>x.id===it.stockId);
   if(ant&&ant.pedidoCurso&&ant.pedidoCurso.oc===o.numero) b.set(db.collection(SCOL.items).doc(ant.id),{pedidoCurso:null,actualizado:Date.now()},{merge:true});
   if(alStock){
     const mref=db.collection(SCOL.movs).doc(); movs.push(mref.id);
-    b.set(mref,{itemId:m.id,codigo:m.codigo,descripcion:m.descripcion,area:m.area,unidad:m.unidad,tipo:'entrada',cantidad:rec,motivo:'Compra',ref:o.numero+' · recibido antes de vincular',
-      usuario:S.nombre,email:S.email,fecha:Date.now(),stockRes:r3(num(m.stock)+rec),origen:'ComprasApp',ocId:o.id});
-    patch.stock=firebase.firestore.FieldValue.increment(rec);
-    if(conCosto&&num(it.precioUnit)>0){ patch.costo=costoNeto(it.precioUnit,o); patch.moneda=o.moneda; }
-    if(res) patch.reservas=[...(m.reservas||[]),{id:'r'+Date.now().toString(36),destino:res.nombre,reservaId:res.id,cantidad:rec,fecha:Date.now(),usuario:S.nombre,origen:'ComprasApp',oc:o.numero}];
+    b.set(mref,{itemId:m.id,codigo:m.codigo,descripcion:m.descripcion,area:m.area,unidad:m.unidad,tipo:'entrada',cantidad:recS,motivo:'Compra',ref:o.numero+' · recibido antes de vincular',
+      usuario:S.nombre,email:S.email,fecha:Date.now(),stockRes:r3(num(m.stock)+recS),origen:'ComprasApp',ocId:o.id});
+    patch.stock=firebase.firestore.FieldValue.increment(recS);
+    if(res) patch.reservas=[...(m.reservas||[]),{id:'r'+Date.now().toString(36),destino:res.nombre,reservaId:res.id,cantidad:recS,fecha:Date.now(),usuario:S.nombre,origen:'ComprasApp',oc:o.numero}];
   }
   // si todavía falta recibir, queda como "pedido en curso" en StockApp
-  if(['emitida','parcial'].includes(o.estado) && rec<num(it.cantidad)) patch.pedidoCurso={fecha:Date.now(),cantidad:num(it.cantidad)-rec,oc:o.numero};
+  if(['emitida','parcial'].includes(o.estado) && rec<num(it.cantidad)) patch.pedidoCurso={fecha:Date.now(),cantidad:f>0?aStock(num(it.cantidad)-rec,f):num(it.cantidad)-rec,oc:o.numero};
+  // si la OC ya está emitida, el renglón recién vinculado actualiza el costo como al emitir (mismo update del ítem)
+  if(!['borrador','anulada'].includes(o.estado)){ const pat={[m.id]:patch}; await costosEnPatches({...o,items},pat,k,f>0&&$('vc-f')?{[k]:f}:null); Object.assign(patch,pat[m.id]); }
   b.set(db.collection(SCOL.items).doc(m.id),patch,{merge:true});
   if(alStock) b.set(db.collection(COL.rec).doc(),{ocId:o.id,numero:o.numero,fecha:hoy(),remito:'',obs:'Ingreso al vincular el ítem '+it.n+' con StockApp',alStock:true,movimientos:movs,
-    reservaId:res?'si':'',usuario:S.email,creado:ts(),items:[{n:it.n,codigo:m.codigo,stockId:m.id,descripcion:it.descripcion,unidad:m.unidad||it.unidad,cantidad:rec,reserva:res?res.nombre:''}]});
+    reservaId:res?'si':'',usuario:S.email,creado:ts(),items:[{n:it.n,codigo:m.codigo,stockId:m.id,descripcion:it.descripcion,unidad:it.unidad||m.unidad,cantidad:rec,cantStock:recS,unidadStock:m.unidad||'',reserva:res?res.nombre:''}]});
   b.update(db.collection(COL.oc).doc(o.id),{items,actualizado:ts(),actualizadoPor:S.email,
-    historial:firebase.firestore.FieldValue.arrayUnion(entradaHist(o.estado,'Ítem '+it.n+' vinculado a '+m.codigo+(alStock?' · '+fmtCant(rec)+' ingresado a StockApp':'')+(res?' · reservado para '+res.nombre:'')))});
+    historial:firebase.firestore.FieldValue.arrayUnion(entradaHist(o.estado,'Ítem '+it.n+' vinculado a '+m.codigo+(alStock?' · '+fmtCant(recS)+' '+(m.unidad||'')+' ingresado a StockApp':'')+(res?' · reservado para '+res.nombre:'')))});
   if($('vc-ok')) $('vc-ok').disabled=true;
   cerrarModal();
   await escribir(b.commit(),'Ítem '+it.n+' vinculado a '+m.codigo+(alStock?' · stock cargado':''));
@@ -1226,18 +1395,19 @@ function modalRecepcion(id){
   const o=S.ocs.find(x=>x.id===id), its=o.items||[], hayStock=its.some(i=>i.stockId);
   abrirModal(`<h3>Registrar recepción · ${esc(o.numero)}</h3>
     <div class="fila"><div><label for="r-fecha">Fecha</label><input type="date" id="r-fecha" value="${hoy()}"></div><div><label for="r-remito">N° de remito</label><input id="r-remito"></div></div>
-    ${its.map((it,k)=>{ const pend=Math.max(0,r3(num(it.cantidad)-num(it.cantRecibida)));
+    ${its.map((it,k)=>{ const pend=Math.max(0,r3(num(it.cantidad)-num(it.cantRecibida))), si=it.stockId&&S.stock.items.find(x=>x.id===it.stockId);
       return `<div class="item"><div class="item-h"><span>Ítem ${it.n}</span>${it.stockId?`<span class="badge emitida">${esc(it.codigo)}</span>`:''}</div>
         <div>${esc(it.descripcion)}</div>
         <div class="muted">Pedido ${fmtCant(it.cantidad)} ${esc(it.unidad)} · Recibido ${fmtCant(it.cantRecibida)} · Pendiente ${fmtCant(pend)}</div>
-        <label for="r-c${k}">Recibido ahora (${esc(it.unidad)})</label><input type="number" inputmode="decimal" step="any" min="0" id="r-c${k}" value="${pend}">
+        <label for="r-c${k}">Recibido ahora (${esc(it.unidad)})</label><input type="number" inputmode="decimal" step="any" min="0" id="r-c${k}" value="${pend}"${si&&!mismaUnidad(it,si)?` oninput="pistaConv('r-f${k}','r-c${k}')"`:''}>
+        ${si?campoConv('r-f'+k,'r-c'+k,o,it,si):''}
         ${it.stockId?(()=>{ const r=resItem(o,it); return `<label for="r-rs${k}">Reservar lo recibido para</label><select id="r-rs${k}">${opcionesDestino(r?r.id:'-','rec',r)}</select>`; })():''}</div>`; }).join('')}
     ${hayStock?`<label class="chk"><input type="checkbox" id="r-stock" checked>Ingresar al stock de StockApp los ítems con código</label>
-      <label class="chk"><input type="checkbox" id="r-costo" checked>Actualizar el costo en StockApp con el precio de esta OC</label>
       <div class="pista">Podés repartir un ítem entre reservas recibiéndolo en partes: cada recepción con su reserva.</div>`:''}
     ${its.some(i=>!i.stockId)?`<div class="pista txt-amarillo">${its.filter(i=>!i.stockId).length} ítem(s) sin vincular con StockApp: no entran al stock. Podés vincularlos desde el detalle de la OC (también después de recibir).</div>`:''}
     <label for="r-obs">Observaciones (opcional)</label><input id="r-obs">
     <div class="acciones"><button class="btn" onclick="cerrarModal()">Cancelar</button><button class="btn pri" onclick="guardarRecepcion('${id}')">Guardar recepción</button></div>`);
+  its.forEach((it,k)=>{ if($('r-f'+k)) pistaConv('r-f'+k,'r-c'+k); });
 }
 async function guardarRecepcion(id){
   const o=S.ocs.find(x=>x.id===id), fecha=$('r-fecha').value, remito=$('r-remito').value.trim(), obs=$('r-obs').value.trim();
@@ -1245,7 +1415,12 @@ async function guardarRecepcion(id){
   const cant=(o.items||[]).map((it,k)=>num($('r-c'+k).value));
   if(cant.some(c=>c<0)) return toast('Las cantidades no pueden ser negativas');
   if(!cant.some(c=>c>0)) return toast('Cargá al menos una cantidad recibida');
-  const alStock=!!($('r-stock')&&$('r-stock').checked), conCosto=!!($('r-costo')&&$('r-costo').checked);
+  const alStock=!!($('r-stock')&&$('r-stock').checked);
+  // cantidad que entra al stock, en la unidad del material (la OC puede estar en kg, m, etc.)
+  const fac=(o.items||[]).map((it,k)=>factorDe('r-f'+k));
+  if(alStock){ const k=fac.findIndex((f,k)=>cant[k]>0&&o.items[k].stockId&&!(f>0));
+    if(k>=0) return toast(`Ítem ${o.items[k].n}: completá cuántos ${o.items[k].unidad} entran en 1 unidad de stock`,4000); }
+  const cantS=cant.map((c,k)=>aStock(c,fac[k]>0?fac[k]:1));
   // reserva elegida en la recepción para cada ítem (puede cambiar la de la OC)
   const resK=(o.items||[]).map((it,k)=>{ const el=$('r-rs'+k); if(!el) return undefined; const v=el.value; if(!v||v==='-') return null; const r0=resItem(o,it);
     return reservaDe(v)||(r0&&r0.id===v?r0:null); });
@@ -1263,18 +1438,17 @@ async function guardarRecepcion(id){
     const si=it.stockId&&S.stock.items.find(x=>x.id===it.stockId); if(!si||!(cant[k]>0)) return;
     const mref=db.collection(SCOL.movs).doc(); movs.push(mref.id);
     // movimiento con el mismo formato que usa StockApp
-    b.set(mref,{itemId:si.id,codigo:si.codigo,descripcion:si.descripcion,area:si.area,unidad:si.unidad,tipo:'entrada',cantidad:cant[k],motivo:'Compra',ref:refTxt,
-      usuario:S.nombre,email:S.email,fecha:Date.now(),stockRes:r3(num(si.stock)+cant[k]),origen:'ComprasApp',ocId:o.id});
-    const patch={stock:firebase.firestore.FieldValue.increment(cant[k]),actualizado:Date.now()};
+    b.set(mref,{itemId:si.id,codigo:si.codigo,descripcion:si.descripcion,area:si.area,unidad:si.unidad,tipo:'entrada',cantidad:cantS[k],motivo:'Compra',ref:refTxt,
+      usuario:S.nombre,email:S.email,fecha:Date.now(),stockRes:r3(num(si.stock)+cantS[k]),origen:'ComprasApp',ocId:o.id});
+    const patch={stock:firebase.firestore.FieldValue.increment(cantS[k]),actualizado:Date.now()};
     if(items[k].cantRecibida>=num(it.cantidad)-1e-9) patch.pedidoCurso=null;      // ítem completo: ya no está "en curso"
-    if(conCosto&&num(it.precioUnit)>0){ patch.costo=costoNeto(it.precioUnit,o); patch.moneda=o.moneda; }
     // Misma reserva que se hace desde StockApp (ficha del material → Reservar), con la OC de origen
     const res=resK[k];
-    if(res){ patch.reservas=[...(si.reservas||[]),{id:'r'+Date.now().toString(36)+k,destino:res.nombre,reservaId:res.id,cantidad:cant[k],fecha:Date.now(),usuario:S.nombre,origen:'ComprasApp',oc:o.numero}]; nRes++; nombresRes.add(res.nombre); }
+    if(res){ patch.reservas=[...(si.reservas||[]),{id:'r'+Date.now().toString(36)+k,destino:res.nombre,reservaId:res.id,cantidad:cantS[k],fecha:Date.now(),usuario:S.nombre,origen:'ComprasApp',oc:o.numero}]; nRes++; nombresRes.add(res.nombre); }
     b.set(db.collection(SCOL.items).doc(si.id),patch,{merge:true});
   });
   b.set(recRef,{ocId:o.id,numero:o.numero,fecha,remito,obs,alStock,movimientos:movs,reservaId:nRes?'si':'',usuario:S.email,creado:ts(),
-    items:o.items.map((it,k)=>({n:it.n,codigo:it.codigo||'',stockId:it.stockId||'',descripcion:it.descripcion,unidad:it.unidad,cantidad:cant[k],
+    items:o.items.map((it,k)=>({n:it.n,codigo:it.codigo||'',stockId:it.stockId||'',descripcion:it.descripcion,unidad:it.unidad,cantidad:cant[k],cantStock:it.stockId?cantS[k]:null,
       reserva:alStock&&resK[k]?resK[k].nombre:''})).filter(x=>x.cantidad>0)});
   const txtRes=nRes?' · reservado para '+[...nombresRes].join(', '):'';
   b.update(db.collection(COL.oc).doc(o.id),{items,estado:nuevo,...(cambioRes?{resPorItem:true}:{}),actualizado:ts(),actualizadoPor:S.email,

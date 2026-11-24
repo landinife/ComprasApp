@@ -19,13 +19,13 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;500;600&display=swap">
 <style>
 /* TEMA VIDRIO (unificado con StockApp y ProducciónApp): fondo oscuro con brillos, paneles translúcidos, Barlow / Barlow Condensed */
-:root{--bg:#0f1319;--solid:#1a2029;--card:rgba(255,255,255,.045);--card2:rgba(255,255,255,.085);--border:rgba(220,232,245,.13);--text:#eaf0f6;--muted:#9fb0c1;--accent:#4fb0ff;--accent-ink:#04203a;--ok:#2fcf7a;--warn:#f2b437;--bad:#f0625a;--violet:#a98bff;
+:root{--bg:#0f1319;--solid:#1a2029;--card:rgba(255,255,255,.045);--card2:rgba(255,255,255,.085);--border:rgba(220,232,245,.13);--text:#eaf0f6;--muted:#9fb0c1;--accent:#4fb0ff;--accent-ink:#04203a;--ok:#2fcf7a;--warn:#f2b437;--bad:#f0625a;--violet:#a98bff;--precaucion:#f5c518;--franjas:repeating-linear-gradient(-45deg,#f5c518 0 9px,#111 9px 18px);
   --input:rgba(255,255,255,.05);--btn:rgba(255,255,255,.07);--btn-h:rgba(255,255,255,.14);--float:rgba(24,30,38,.94);--velo:rgba(5,7,10,.5);--head:rgba(18,23,30,.78);--nav:rgba(16,21,28,.72);
   --shadow:inset 0 1px 0 rgba(255,255,255,.08),0 10px 30px rgba(0,0,0,.32);
   --brillos:radial-gradient(900px 560px at 8% -8%,color-mix(in srgb,var(--accent) 26%,transparent),transparent 68%),radial-gradient(820px 640px at 102% 18%,rgba(110,96,220,.16),transparent 68%),radial-gradient(900px 620px at 55% 108%,rgba(46,150,140,.15),transparent 68%);
   --f-tit:"Barlow Condensed","Arial Narrow",sans-serif;--f-txt:"Barlow",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color-scheme:dark}
 /* Tema claro: solo si se elige en Configuración */
-:root[data-theme="light"]{--bg:#eef2f7;--solid:#fff;--card:#fff;--card2:#f4f7fb;--border:#d3dce7;--text:#16202c;--muted:#5c6b7d;--accent:#1f7ae0;--accent-ink:#fff;--ok:#16a35a;--warn:#b97f00;--bad:#d63b31;--violet:#7357d9;
+:root[data-theme="light"]{--bg:#eef2f7;--solid:#fff;--card:#fff;--card2:#f4f7fb;--border:#d3dce7;--text:#16202c;--muted:#5c6b7d;--accent:#1f7ae0;--accent-ink:#fff;--ok:#16a35a;--warn:#b97f00;--bad:#d63b31;--violet:#7357d9;--precaucion:#9a7400;
   --input:#fff;--btn:#f4f7fb;--btn-h:#e3eaf3;--float:rgba(255,255,255,.97);--velo:rgba(20,30,45,.35);--head:rgba(255,255,255,.82);--nav:rgba(255,255,255,.82);
   --shadow:0 1px 4px rgba(20,40,70,.08);--brillos:none;color-scheme:light}
 *{box-sizing:border-box}
@@ -101,8 +101,15 @@ nav.inferior button.activo{color:var(--text);background:color-mix(in srgb,var(--
 /* Cuadros de alerta */
 .tiles{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:16px}
 @media(min-width:620px){.tiles{grid-template-columns:repeat(3,minmax(0,1fr))}}
+/* Pantalla Órdenes: fila de arriba con 4 cuadros; en el teléfono, un cuadro solo al final ocupa todo el ancho */
+.tiles.tiles-4{margin-bottom:10px}
+@media(min-width:620px){.tiles.tiles-4{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media(max-width:619px){.tiles>.tile:last-child:nth-child(odd){grid-column:1/-1}}
 .tile{--c:var(--accent);text-align:left;background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--border);border-top:3px solid var(--c);border-radius:16px;padding:12px;display:flex;flex-direction:column;gap:2px;color:var(--text);cursor:pointer;font-family:inherit;min-width:0;box-shadow:var(--shadow)}
 .tile.t-bad{--c:var(--bad)}.tile.t-warn{--c:var(--warn)}.tile.t-ok{--c:var(--ok)}.tile.t-muted{--c:var(--muted)}.tile.t-violet{--c:var(--violet)}
+/* Recepción parcial: franjas de precaución amarillo/negro */
+.tile.t-precaucion{--c:var(--precaucion);position:relative;overflow:hidden;border-top:1px solid var(--border);padding-top:16px}
+.tile.t-precaucion::before{content:"";position:absolute;left:0;right:0;top:0;height:7px;background:var(--franjas)}
 .tile-lbl{font-family:var(--f-tit);font-weight:700;text-transform:uppercase;letter-spacing:1.2px;font-size:14px;color:var(--muted)}
 .tile-num{font-family:var(--f-tit);font-weight:700;font-size:38px;line-height:1.05;color:var(--c);font-variant-numeric:tabular-nums}
 .tile-sub{font-size:13px;color:var(--muted)}
@@ -120,7 +127,13 @@ nav.inferior button.activo{color:var(--text);background:color-mix(in srgb,var(--
 .dot.verde{background:var(--ok)}.dot.amarillo{background:var(--warn)}.dot.rojo{background:var(--bad)}
 .txt-rojo{color:var(--bad);font-weight:600}.txt-amarillo{color:var(--warn);font-weight:600}.txt-verde{color:var(--ok);font-weight:600}.txt-gris{color:var(--muted)}
 .badge{--c:var(--muted);display:inline-block;padding:3px 9px;border-radius:6px;font-family:var(--f-tit);font-weight:700;font-size:13px;text-transform:uppercase;letter-spacing:.6px;color:var(--c);background:color-mix(in srgb,var(--c) 15%,transparent);border:1px solid color-mix(in srgb,var(--c) 35%,transparent)}
-.badge.emitida{--c:var(--accent)}.badge.parcial{--c:var(--warn)}.badge.recibida{--c:var(--ok)}.badge.facturada{--c:var(--violet)}.badge.pagada{--c:var(--ok)}.badge.anulada{--c:var(--bad)}
+.badge.emitida{--c:var(--accent)}.badge.recibida{--c:var(--ok)}.badge.facturada{--c:var(--violet)}.badge.pagada{--c:var(--ok)}.badge.anulada{--c:var(--bad)}
+.badge.parcial{color:#111;background:#f5c518;border:1px solid #111}
+/* Avance de la recepción parcial en la tarjeta */
+.avance{margin-top:8px;font-size:14px;color:var(--precaucion);font-weight:600}
+.avance .pct{font-variant-numeric:tabular-nums}
+.avance .barra{height:8px;border-radius:4px;margin-top:5px;background:color-mix(in srgb,var(--muted) 20%,transparent);overflow:hidden}
+.avance .barra i{display:block;height:100%;border-radius:4px;background:var(--franjas)}
 .muted{color:var(--muted);font-size:14px}
 /* Ventana emergente: velo con desenfoque y caja densa */
 #modal{position:fixed;inset:0;background:var(--velo);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);display:none;z-index:50;align-items:flex-end;justify-content:center}
@@ -554,21 +567,34 @@ function tarjetaOC(o){
     <div class="oc-prov">${esc(prov)}</div>
     <div class="lin"><span class="muted">${esc(dest)}${o.razonSnap?' · '+esc(o.razonSnap.nombre):''}</span><span class="badge ${o.estado}">${nombreEstado(o.estado)}</span></div>
     ${td?`<div class="oc-dias txt-${sem}"><span class="dot ${sem}"></span>${td} · ${fmtFecha(o.fechaNecesidad)}</div>`:''}
+    ${avanceOC(o)}
   </div>`;
 }
+// Avance de una OC con recepción parcial (por ítem, así no se mezclan unidades)
+function avanceOC(o){
+  if(o.estado!=='parcial') return '';
+  const its=(o.items||[]).filter(it=>num(it.cantidad)>0); if(!its.length) return '';
+  const fr=its.map(it=>Math.min(1,Math.max(0,num(it.cantRecibida)/num(it.cantidad))));
+  const comp=fr.filter(f=>f>=1-1e-9).length, medio=fr.filter(f=>f>0&&f<1-1e-9).length;
+  const pct=Math.round(fr.reduce((s,f)=>s+f,0)/its.length*100);
+  return `<div class="avance"><div class="lin"><span>Recibido ${comp} de ${its.length} ítem${its.length===1?'':'s'}${medio?` · ${medio} en parte`:''}</span><span class="pct">${pct} %</span></div>
+    <div class="barra"><i style="width:${Math.max(2,pct)}%"></i></div></div>`;
+}
 // Cuadros de alerta de la pantalla Órdenes (tocar uno filtra la lista)
+// fila 1 = lo que esperamos que llegue · fila 2 = administración
 const TILES=[
-  {id:'rojo', titulo:'Urgentes', color:'bad', fn:o=>semaforo(o)==='rojo'},
-  {id:'amarillo', titulo:'Próximas', color:'warn', fn:o=>semaforo(o)==='amarillo'},
-  {id:'verde', titulo:'En término', color:'ok', fn:o=>semaforo(o)==='verde'},
-  {id:'borrador', titulo:'Borradores', color:'muted', fn:o=>o.estado==='borrador'},
-  {id:'porfacturar', titulo:'Por facturar', color:'accent', fn:o=>o.estado==='recibida'},
-  {id:'porpagar', titulo:'Por pagar', color:'violet', fn:o=>o.estado==='facturada'}
+  {id:'rojo', fila:1, titulo:'Urgentes', color:'bad', fn:o=>semaforo(o)==='rojo'},
+  {id:'amarillo', fila:1, titulo:'Próximas', color:'warn', fn:o=>semaforo(o)==='amarillo'},
+  {id:'verde', fila:1, titulo:'En término', color:'ok', fn:o=>semaforo(o)==='verde'},
+  {id:'parcial', fila:1, titulo:'Recepción parcial', color:'precaucion', fn:o=>o.estado==='parcial'},
+  {id:'borrador', fila:2, titulo:'Borradores', color:'muted', fn:o=>o.estado==='borrador'},
+  {id:'porfacturar', fila:2, titulo:'Por facturar', color:'accent', fn:o=>o.estado==='recibida'},
+  {id:'porpagar', fila:2, titulo:'Por pagar', color:'violet', fn:o=>o.estado==='facturada'}
 ];
 function subTile(id){
   const s=S.cfg.semaforo;
   return {rojo:`Vencidas o ≤ ${s.rojo} días`, amarillo:`Faltan ${num(s.rojo)+1} a ${s.amarillo} días`, verde:`Faltan más de ${s.amarillo} días`,
-    borrador:'Sin emitir', porfacturar:'Recibidas sin factura', porpagar:'Facturadas sin pago'}[id];
+    parcial:'Llegó una parte, falta el resto', borrador:'Sin emitir', porfacturar:'Recibidas sin factura', porpagar:'Facturadas sin pago'}[id];
 }
 function elegirTile(id){ S.filtros.tile = S.filtros.tile===id ? '' : id; renderInicio(); }
 function nFiltros(){ const F=S.filtros; return ['estado','destino','proveedor','moneda','razon','desde','hasta'].filter(k=>F[k]).length; }
@@ -578,7 +604,7 @@ function ocsFiltradas(){
     &&(!F.moneda||o.moneda===F.moneda)&&(!F.razon||o.razonId===F.razon)&&(!F.desde||o.fechaEmision>=F.desde)&&(!F.hasta||o.fechaEmision<=F.hasta)
     &&(!q||(o.numero||'').toLowerCase().includes(q)||(o.textoBusqueda||'').includes(q)));
   // con un cuadro del semáforo elegido, ordena por fecha de necesidad
-  if(t&&['rojo','amarillo','verde'].includes(t.id)) l.sort((a,b)=>(a.fechaNecesidad||'').localeCompare(b.fechaNecesidad||''));
+  if(t&&['rojo','amarillo','verde','parcial'].includes(t.id)) l.sort((a,b)=>(a.fechaNecesidad||'').localeCompare(b.fechaNecesidad||''));
   return l;
 }
 function setFiltro(k,v){ S.filtros[k]=v; renderListaOC(); }
@@ -598,10 +624,10 @@ function panelFiltros(){
 function renderInicio(){
   const el=$('v-inicio');
   if(!S.cfg){ el.innerHTML='<p class="muted centro">Cargando…</p>'; return; }
-  const tiles=TILES.map(t=>{ const n=S.ocs.filter(t.fn).length;
+  const fila=f=>TILES.filter(t=>t.fila===f).map(t=>{ const n=S.ocs.filter(t.fn).length;
     return `<button class="tile t-${t.color} ${S.filtros.tile===t.id?'activo':''} ${n?'':'vacio'}" onclick="elegirTile('${t.id}')">
       <span class="tile-lbl">${t.titulo}</span><span class="tile-num">${n}</span><span class="tile-sub">${subTile(t.id)}</span></button>`; }).join('');
-  let h=`<h2 class="titulo-sec">Órdenes de compra</h2><div class="tiles">${tiles}</div>
+  let h=`<h2 class="titulo-sec">Órdenes de compra</h2><div class="tiles tiles-4">${fila(1)}</div><div class="tiles">${fila(2)}</div>
     <div class="fila" style="margin-bottom:10px;flex-wrap:nowrap">
       <input id="f-texto" placeholder="Buscar por n° o descripción" value="${esc(S.filtros.texto)}" oninput="S.filtros.texto=this.value;renderListaOC()">
       <button class="btn" style="flex:0 0 auto" onclick="S.verFiltros=!S.verFiltros;renderInicio()">Filtros${nFiltros()?' ('+nFiltros()+')':''}</button></div>`;

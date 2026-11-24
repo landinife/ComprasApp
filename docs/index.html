@@ -727,7 +727,7 @@ function renderForm(){
   </div>
   <div class="card">
     <label>Condición de pago</label><input value="${esc(f.condicionPago)}" placeholder="Ej.: 30 días fecha factura" oninput="setF('condicionPago',this.value)" id="f-condpago">
-    <label>Lugar de entrega</label><input value="${esc(f.lugarEntrega)}" oninput="setF('lugarEntrega',this.value)">
+    <label>Lugar de entrega</label><input id="f-lugar" value="${esc(f.lugarEntrega)}" oninput="setF('lugarEntrega',this.value)">
     <label>Observaciones</label><textarea oninput="setF('observaciones',this.value)">${esc(f.observaciones)}</textarea>
   </div>
   <div class="acciones">
@@ -1795,13 +1795,14 @@ function modalProveedor(id,desdeOC){
     ${campo('contacto','Contacto')}
     <div class="fila"><div>${campo('telefono','Teléfono / WhatsApp','inputmode="tel" placeholder="Con código de área"')}</div><div>${campo('mail','Mail','type="email"')}</div></div>
     ${campo('condicionPago','Condición de pago habitual')}
+    ${campo('lugarEntrega','Lugar de entrega habitual')}
     <div class="acciones">
       ${id?`<button class="btn peligro" onclick="borrarProveedor('${id}')">Borrar</button>`:''}
       <button class="btn" onclick="cerrarModal()">Cancelar</button>
       <button class="btn pri" onclick="guardarProveedor('${id||''}',${desdeOC})">Guardar</button></div>`);
 }
 async function guardarProveedor(id,desdeOC){
-  const k=['razonSocial','cuit','rubro','contacto','telefono','mail','condicionPago'], d={};
+  const k=['razonSocial','cuit','rubro','contacto','telefono','mail','condicionPago','lugarEntrega'], d={};
   k.forEach(c=>d[c]=$('mp-'+c).value.trim());
   if(!d.razonSocial) return toast('La razón social es obligatoria');
   d.actualizado=ts();
@@ -1827,10 +1828,18 @@ function listaElegirProv(){
   const l=filtrarProv($('mp-buscar').value);
   $('mp-lista').innerHTML = l.map(p=>`<div onclick="elegirProveedor('${p.id}')"><b>${esc(p.razonSocial)}</b><div class="muted">${esc(p.cuit||'')} ${esc(p.rubro||'')}</div></div>`).join('') || '<div class="muted">Sin resultados</div>';
 }
+// Lugar de entrega del proveedor: el habitual de su ficha o, si no tiene, el de su última OC (sin contar las anuladas)
+function lugarHabitual(id,p){
+  if(p&&String(p.lugarEntrega||'').trim()) return p.lugarEntrega.trim();
+  const o=S.ocs.find(x=>x.proveedorId===id&&x.estado!=='anulada'&&String(x.lugarEntrega||'').trim());
+  return o?o.lugarEntrega.trim():'';
+}
 function elegirProveedor(id,datos){
   const p=datos||S.provs.find(x=>x.id===id); if(!S.form||!p) return;
   S.form.proveedorId=id; S.form.proveedorSnap={razonSocial:p.razonSocial,cuit:p.cuit||'',contacto:p.contacto||'',telefono:p.telefono||'',mail:p.mail||''};
   if(!S.form.condicionPago && p.condicionPago){ S.form.condicionPago=p.condicionPago; if($('f-condpago')) $('f-condpago').value=p.condicionPago; }
+  // precarga el lugar de entrega solo si el campo está vacío (queda editable)
+  if(!String(S.form.lugarEntrega||'').trim()){ const lu=lugarHabitual(id,p); if(lu){ S.form.lugarEntrega=lu; if($('f-lugar')) $('f-lugar').value=lu; } }
   if($('f-prov')) $('f-prov').textContent=p.razonSocial;
   cerrarModal(); if($('items')) renderItems(); // actualiza los últimos precios de este proveedor
 }

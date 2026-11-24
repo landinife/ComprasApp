@@ -174,6 +174,10 @@ details.card[open]>summary{margin-bottom:10px}
 .mes.actual .col{background:var(--accent)}
 .mes .v{font-size:10px;color:var(--muted);white-space:nowrap}
 .mes .m{font-family:var(--f-tit);font-size:12px;text-transform:uppercase;color:var(--muted)}
+/* Muestras de color de énfasis (Configuración → Apariencia) */
+.acentos{display:flex;flex-wrap:wrap;gap:8px}
+.sw i{width:18px;height:18px;border-radius:50%;background:var(--sw);box-shadow:0 0 10px color-mix(in srgb,var(--sw) 55%,transparent);flex:none}
+.sw[aria-pressed=true]{border-color:var(--sw);box-shadow:0 0 0 1px var(--sw);background:color-mix(in srgb,var(--sw) 16%,transparent)}
 @media (prefers-reduced-motion: reduce){*{transition:none!important;animation:none!important}}
 </style>
 </head>
@@ -330,9 +334,9 @@ function fmtMon(n,mon){ return (mon==='USD'?'US$ ':'$ ')+fmtNum(n); }
 const nombreEstado = id => (ESTADOS.find(e=>e.id===id)||{}).nombre || id;
 
 function toast(msg,ms=2800){ const t=$('toast'); t.textContent=msg; t.style.display='block'; clearTimeout(t._h); t._h=setTimeout(()=>t.style.display='none',ms); }
-function abrirModal(html,clase){ $('modal-caja').className='caja '+(clase||''); $('modal-caja').innerHTML=html; $('modal').classList.add('abierto'); }
+function abrirModal(html,clase){ $('modal-caja').className='caja '+(clase||''); $('modal-caja').innerHTML=html; $('modal').classList.add('abierto'); programarHistorial(); }
 let MODAL_AL_CERRAR=null;   // acción al cerrar la ventana tocando afuera (la usa la ventana de costos)
-function cerrarModal(){ $('modal').classList.remove('abierto'); if(MODAL_AL_CERRAR){ const f=MODAL_AL_CERRAR; MODAL_AL_CERRAR=null; f(); } }
+function cerrarModal(){ $('modal').classList.remove('abierto'); if(MODAL_AL_CERRAR){ const f=MODAL_AL_CERRAR; MODAL_AL_CERRAR=null; f(); } programarHistorial(); }
 // Mensajes de error de Firestore entendibles
 function errorFS(e){ console.error(e); if(e&&e.code==='permission-denied') toast('Sin permiso para esta acción (revisá las reglas o los correos autorizados).',4000); else toast('Error: '+(e&&e.message||e),4000); }
 // Ejecuta una escritura: con internet espera la confirmación; sin internet queda en cola
@@ -346,6 +350,19 @@ function aplicarTema(){ const t=temaActual(); document.documentElement.dataset.t
   const m=document.querySelector('meta[name="theme-color"]'); if(m) m.content=t==='light'?'#eef2f7':'#151a20'; }
 function elegirTema(t){ try{localStorage.setItem('compras_tema',t);}catch(e){} aplicarTema(); }
 aplicarTema();
+// ===== Color de énfasis (igual que StockApp): se guarda en este dispositivo =====
+const ACENTOS=[['Azul','#4fb0ff'],['Naranja','#ef7d32'],['Verde','#4cc38a'],['Turquesa','#3fc1c9'],['Violeta','#ab8cec'],['Rosa','#ec6fa7'],['Amarillo','#e8b84a'],['Rojo','#f0736b']];
+function acentoActual(){ try{ return localStorage.getItem('compras_acento')||''; }catch(e){ return ''; } }
+// h vacío = azul original de cada tema (oscuro o claro)
+function ponerAcento(h,guardar){
+  const st=document.documentElement.style;
+  if(!/^#[0-9a-f]{6}$/i.test(h||'')){ st.removeProperty('--accent'); st.removeProperty('--accent-ink'); h=''; }
+  else { const n=parseInt(h.slice(1),16), L=c=>{c/=255;return c<=.03928?c/12.92:((c+.055)/1.055)**2.4}, lum=.2126*L(n>>16)+.7152*L(n>>8&255)+.0722*L(n&255);
+    st.setProperty('--accent',h); st.setProperty('--accent-ink',lum>.33?'#04203a':'#ffffff'); }
+  if(guardar){ try{ if(h) localStorage.setItem('compras_acento',h); else localStorage.removeItem('compras_acento'); }catch(e){} }
+}
+function elegirAcento(h){ ponerAcento(h,true); renderConfig(); }
+ponerAcento(acentoActual());
 
 // ===== Aviso de conexión =====
 function avisoConexion(){ $('offline').style.display = navigator.onLine ? 'none' : 'block'; }
@@ -370,11 +387,12 @@ async function olvideClave(){
   try{ await auth.sendPasswordResetEmail(m); toast('Te enviamos un correo para cambiar la contraseña'); }
   catch(e){ $('l-err').textContent=ERR_AUTH[e.code]||('No se pudo enviar: '+e.code); }
 }
-function salir(){ S.unsub.forEach(u=>u()); S.unsub=[]; auth.signOut(); }
+function salir(){ if(!auth) return location.reload();   // si Firebase no arrancó, el botón reintenta
+  S.unsub.forEach(u=>u()); S.unsub=[]; auth.signOut(); }
 function sinAcceso(msg){ $('nav').style.display='none'; $('noauth-msg').textContent=msg; mostrarVista('noauth'); }
 
 // Si Firebase no arrancó, muestra el motivo en pantalla
-if(errorInicio){ mostrarVista('noauth'); document.querySelector('#v-noauth h2').textContent='No se pudo iniciar la app'; $('noauth-msg').textContent=errorInicio; }
+if(errorInicio){ mostrarVista('noauth'); document.querySelector('#v-noauth h2').textContent='No se pudo iniciar la app'; document.querySelector('#v-noauth .btn').textContent='Reintentar'; $('noauth-msg').textContent=errorInicio; }
 else auth.onAuthStateChanged(async u=>{
   S.unsub.forEach(f=>f()); S.unsub=[];
   if(!u){ $('nav').style.display='none'; mostrarVista('login'); return; }
@@ -448,6 +466,40 @@ const separaMaterial = r => !!r && r.tipo!=='general';
 
 // =====================================================================
 // 4) NAVEGACIÓN
+// ---- Atrás: tecla Esc, botón lateral del mouse y botón atrás del teléfono ----
+// Mientras haya adónde volver (una ventana abierta o una sección que no sea Órdenes) se deja
+// una marca en el historial del navegador; al tocar atrás se saca la marca y se vuelve dentro de la app.
+var VISTAS_RAIZ=['','inicio','login','noauth'], IGNORAR_POP=false, T_HIST=null;   // var: se usan también al arrancar
+function modalAbierto(){ return $('modal').classList.contains('abierto'); }
+function sincronizarHistorial(){
+  const hace=modalAbierto()||!VISTAS_RAIZ.includes(S.vista), hay=!!(history.state&&history.state.compras);
+  try{
+    if(hace&&!hay) history.pushState({compras:1},'');
+    else if(!hace&&hay){ IGNORAR_POP=true; history.back(); }   // se volvió a Órdenes con un botón: se saca la marca
+  }catch(e){}
+}
+// se hace un instante después, así cerrar una ventana y abrir otra seguida no ensucia el historial
+function programarHistorial(){ clearTimeout(T_HIST); T_HIST=setTimeout(sincronizarHistorial,0); }
+// Qué hace "atrás" en cada lugar
+function atras(){
+  if(modalAbierto()){ cerrarModal(); return; }
+  if(S.vista==='oc') return salirForm();
+  if(['detalle','metricas','proveedores','config'].includes(S.vista)) irA('inicio');
+}
+// Sale del formulario de la OC: a su detalle si se estaba editando, si no a Órdenes; si hay cambios, pregunta
+function huellaForm(f){ return JSON.stringify(f,(k,v)=>k==='tcMetricas'||k==='tcManual'?undefined:v); }
+function salirForm(){
+  const f=S.form;
+  if(f && S.formIni!==huellaForm(f) && !confirm('¿Salir sin guardar los cambios de la OC?')) return;
+  const id=f&&f.id; S.form=null;
+  if(id) abrirDetalle(id); else irA('inicio');
+}
+addEventListener('popstate',()=>{ if(IGNORAR_POP){ IGNORAR_POP=false; return; } clearTimeout(T_HIST); atras(); sincronizarHistorial(); });
+addEventListener('keydown',e=>{
+  if(e.key!=='Escape'||e.defaultPrevented||e.repeat) return;
+  if(e.target&&e.target.tagName==='SELECT') return;   // Esc solo cierra la lista desplegable
+  e.preventDefault(); atras(); programarHistorial();
+});
 // =====================================================================
 function mostrarVista(v){
   S.vista=v;
@@ -455,8 +507,10 @@ function mostrarVista(v){
   document.querySelectorAll('.vista').forEach(s=>s.classList.toggle('activa',s.id==='v-'+v));
   document.querySelectorAll('nav.inferior button').forEach(b=>b.classList.toggle('activo',b.dataset.v===v || (v==='detalle'&&b.dataset.v==='inicio')));
   scrollTo(0,0);
+  programarHistorial();
 }
-function irA(v){ mostrarVista(v); renderVista(v); }
+function irA(v){ if(v==='config') $('v-config').innerHTML='';   // al entrar, todos los desplegables arrancan cerrados
+  mostrarVista(v); renderVista(v); }
 function renderVista(v){ if(v==='inicio')renderInicio(); else if(v==='detalle')renderDetalle(); else if(v==='proveedores')renderProveedores(); else if(v==='metricas')renderMetricas(); else if(v==='config')renderConfig(); }
 // Vuelve a dibujar la vista actual si está en la lista (sin pisar lo que se está escribiendo)
 function refrescar(vistas){
@@ -578,7 +632,7 @@ function nuevaOC(base){
     condicionPago:'', lugarEntrega:'', observaciones:'', historial:[]
   };
   if(!S.form.items.length) S.form.items=[itemVacio()];
-  renderForm(); mostrarVista('oc');
+  renderForm(); S.formIni=huellaForm(S.form); mostrarVista('oc');
 }
 function editarOC(id){
   const o=S.ocs.find(x=>x.id===id); if(!o) return;
@@ -1804,7 +1858,7 @@ function renderConfig(){
         ${r.id?`<button class="btn chico peligro" onclick="borrarRazon(${i})">Borrar</button>`:''}
         <button class="btn chico pri" onclick="guardarRazon(${i})">Guardar razón social ${i+1}</button></div></div>`; };
   $('v-config').innerHTML=`<h2 class="titulo-sec">Configuración</h2>
-  <details class="card" open><summary>Datos de la empresa</summary>${razonForm(0)}${razonForm(1)}</details>
+  <details class="card"><summary>Datos de la empresa</summary>${razonForm(0)}${razonForm(1)}</details>
   <details class="card"><summary>Usuarios</summary>
     <p class="muted">Son los mismos usuarios de StockApp: se crean allá (Configuración → Usuarios). Acá ${S.esAdmin?'marcás':'el administrador marca'} quién puede usar ComprasApp.</p>
     <div class="item lin"><div><b>Administrador</b><div class="muted">${esc(ADMIN_EMAIL)} · ingresa con Google</div></div><span class="badge recibida">Siempre</span></div>
@@ -1848,7 +1902,11 @@ function renderConfig(){
   <details class="card"><summary>Apariencia</summary>
     <label for="c-tema">Tema</label>
     <select id="c-tema" onchange="elegirTema(this.value)"><option value="dark" ${sel(temaActual(),'dark')}>Oscuro (vidrio)</option><option value="light" ${sel(temaActual(),'light')}>Claro</option></select>
-  </details>
+    <label>Color de énfasis</label>
+    <div class="acentos">${ACENTOS.map(([n,h],k)=>{ const v=k?h:'', act=(acentoActual()||'').toLowerCase()===v;
+      return `<button class="btn chico sw" style="--sw:${h}" aria-pressed="${act}" onclick="elegirAcento('${v}')"><i></i>${n}</button>`; }).join('')}</div>
+    <label for="c-acento">Otro color</label><input type="color" id="c-acento" value="${acentoActual()||'#4fb0ff'}" oninput="ponerAcento(this.value,true)" onchange="renderConfig()" style="height:44px;padding:4px;max-width:120px">
+    <div class="pista">Se usa en botones, sección activa, títulos y gráficos. Se guarda en este dispositivo, así cada usuario elige el suyo.</div>
   <details class="card"><summary>Datos y app</summary>
     <div class="acciones">
       <button class="btn" onclick="compartirApp()">Compartir la app</button>
